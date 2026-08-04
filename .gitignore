@@ -1,0 +1,7 @@
+papers/*.pdf
+*.o
+*.so
+build/
+results/raw/
+__pycache__/
+.venv/
