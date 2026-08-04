@@ -52,8 +52,16 @@
     }                                                                         \
   } while (0)
 
-template <bool POLL>
-__global__ void __launch_bounds__(THREADS) persistent_yield(
+// The second launch_bounds argument pins 4 blocks/SM (forces <=64 regs):
+// the 2026-08-04 Phase 4 sweep silently dropped to 3/SM from added register
+// pressure, orphaning 72 of 288 blocks in unbounded mode. Pinned so the
+// residency shape is a compile-time contract, not an allocator accident.
+// The poll period PE is a template constant for the same reason: as a
+// runtime parameter it pushed the POLL variant into register spills under
+// the pin (36B stores/tile) while POLL=false stayed spill-free, faking a
+// ~10% "overhead" that was really asymmetric spill traffic.
+template <bool POLL, int PE>
+__global__ void __launch_bounds__(THREADS, 4) persistent_yield(
     const float* __restrict__ A, const float* __restrict__ B,
     float* __restrict__ C, float* __restrict__ Cu, int K, int N, int tilesN,
     int totalTiles, unsigned numTasks, unsigned int* nextTask,
@@ -62,20 +70,41 @@ __global__ void __launch_bounds__(THREADS) persistent_yield(
   __shared__ unsigned s_task;
   __shared__ int s_flag;
   __shared__ int s_claimed;
+  // Bookkeeping lives in shared, not registers: as per-thread locals these
+  // pushed the POLL variants into spills under the 4-blocks/SM pin. Only
+  // thread 0 writes them; s_lastSeen is read block-wide.
+  __shared__ int s_lastSeen;
+  __shared__ int s_nextEv;
+  __shared__ int s_sinceCheck;
+  __shared__ long long s_gBase;
 
-  int lastSeen = 0;
-  long long gBase = 0;
-  int nextEv = 0;
   const bool isSetter = (schedGapsNs != nullptr) && blockIdx.x == 0;
+
+  if (threadIdx.x == 0) {
+    s_flag = 0;  // defined before any skipped check
+    s_lastSeen = 0;
+    s_nextEv = 0;
+    s_sinceCheck = 0;
+    s_gBase = 0;
+  }
 
   while (true) {
     if (threadIdx.x == 0) {
       s_task = atomicAdd(nextTask, 1u);
-      if (POLL) s_flag = *flag;  // one volatile L2 read per tile boundary
+      // one volatile L2 read per PE-th tile boundary
+      if (POLL) {
+        if (PE == 1) {
+          s_flag = *flag;
+        } else if (++s_sinceCheck >= PE) {
+          s_flag = *flag;
+          s_sinceCheck = 0;
+        }
+      }
     }
     __syncthreads();
     const unsigned task = s_task;
     const int f = POLL ? s_flag : 0;
+    const int lastSeen = POLL ? s_lastSeen : 0;
     __syncthreads();
     if (f < 0 || task >= numTasks) break;  // -1 = host stop sentinel
 
@@ -88,8 +117,8 @@ __global__ void __launch_bounds__(THREADS) persistent_yield(
         for (int e = lastSeen; e < f; ++e)  // f-lastSeen>1 = missed event(s)
           obsGT[(size_t)e * gridDim.x + blockIdx.x] = g;
         s_claimed = (atomicCAS(&claim[f - 1], 0, (int)blockIdx.x + 1) == 0);
+        s_lastSeen = f;
       }
-      lastSeen = f;
       __syncthreads();
       if (s_claimed) {
         if (threadIdx.x == 0) uGT[2 * (size_t)(f - 1)] = globaltimer_ns();
@@ -99,13 +128,13 @@ __global__ void __launch_bounds__(THREADS) persistent_yield(
       }
     }
 
-    if (isSetter && threadIdx.x == 0 && nextEv < numEvents) {
-      if (gBase == 0) gBase = globaltimer_ns();
+    if (isSetter && threadIdx.x == 0 && s_nextEv < numEvents) {
+      if (s_gBase == 0) s_gBase = globaltimer_ns();
       const long long now = globaltimer_ns();
-      if (now >= gBase + schedGapsNs[nextEv]) {
-        setGT[nextEv] = now;
+      if (now >= s_gBase + schedGapsNs[s_nextEv]) {
+        setGT[s_nextEv] = now;
         __threadfence();  // setGT visible before the flag flips
-        *flag = ++nextEv;
+        *flag = ++s_nextEv;
       }
     }
 
@@ -171,6 +200,8 @@ int main(int argc, char** argv) {
   const double gapMinUs = parse_arg(argc, argv, "--gap-min-us", 150);
   const double gapMaxUs = parse_arg(argc, argv, "--gap-max-us", 400);
   int blocks = (int)parse_arg(argc, argv, "--blocks", 0);
+  const int pollEvery = (int)parse_arg(argc, argv, "--poll-every", 1);
+  const int warmupEvents = (int)parse_arg(argc, argv, "--warmup-events", 100);
   const char* csvPath = parse_str(argc, argv, "--csv", "");
 
   if (K % KB != 0) {
@@ -183,7 +214,7 @@ int main(int argc, char** argv) {
   const int sms = prop.multiProcessorCount;
   int maxPerSM = 0;
   CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-      &maxPerSM, persistent_yield<true>, THREADS, 0));
+      &maxPerSM, persistent_yield<true, 1>, THREADS, 0));
   if (blocks <= 0) blocks = sms * maxPerSM;
 
   const int M = tilesM * TM;
@@ -238,14 +269,37 @@ int main(int argc, char** argv) {
 
   auto launch = [&](bool poll, unsigned nTasks, const long long* sched,
                     int nEvents) {
-    if (poll)
-      persistent_yield<true><<<blocks, THREADS, 0, kStream>>>(
-          dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-          sched, nEvents, dSetGT, dObsGT, dClaim, dUGT);
-    else
-      persistent_yield<false><<<blocks, THREADS, 0, kStream>>>(
+    if (!poll) {
+      persistent_yield<false, 1><<<blocks, THREADS, 0, kStream>>>(
           dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
           nullptr, 0, dSetGT, dObsGT, dClaim, dUGT);
+      return;
+    }
+    switch (pollEvery) {
+      case 1:
+        persistent_yield<true, 1><<<blocks, THREADS, 0, kStream>>>(
+            dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT);
+        break;
+      case 2:
+        persistent_yield<true, 2><<<blocks, THREADS, 0, kStream>>>(
+            dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT);
+        break;
+      case 4:
+        persistent_yield<true, 4><<<blocks, THREADS, 0, kStream>>>(
+            dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT);
+        break;
+      case 8:
+        persistent_yield<true, 8><<<blocks, THREADS, 0, kStream>>>(
+            dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT);
+        break;
+      default:
+        fprintf(stderr, "--poll-every must be 1, 2, 4, or 8\n");
+        exit(1);
+    }
   };
 
   const int stopVal = -1;
@@ -253,9 +307,13 @@ int main(int argc, char** argv) {
   // ------------------------------------------------------------ overhead
   if (mode == "overhead") {
     // ABAB interleave so thermal / clock drift cancels. Flag never set.
+    // First two pairs are warmup (audit 2026-08-04) and are discarded.
+    const int warmPairs = 2;
     std::vector<double> wallPoll, wallNoPoll;
-    for (int r = 0; r < 2 * reps; ++r) {
-      const bool poll = (r % 2 == 0);
+    for (int r = 0; r < 2 * (reps + warmPairs); ++r) {
+      // Alternate which variant leads each pair: a fixed order lets any
+      // within-pair thermal ramp masquerade as (even negative) overhead.
+      const bool poll = ((r / 2) % 2 == 0) ? (r % 2 == 0) : (r % 2 == 1);
       CUDA_CHECK(cudaMemset(dNext, 0, sizeof(unsigned int)));
       CUDA_CHECK(cudaMemset(dFlag, 0, sizeof(int)));
       // Null-stream memsets do NOT order against a non-blocking stream, and
@@ -267,10 +325,12 @@ int main(int argc, char** argv) {
       CUDA_CHECK(cudaStreamSynchronize(kStream));
       const double ms = (now_ns() - t0) / 1e6;
       CUDA_CHECK(cudaGetLastError());
-      (poll ? wallPoll : wallNoPoll).push_back(ms);
+      if (r >= 2 * warmPairs) (poll ? wallPoll : wallNoPoll).push_back(ms);
     }
     const double p = percentile(wallPoll, 0.5), n = percentile(wallNoPoll, 0.5);
-    printf("drain of %u tasks, median of %d reps each (ABAB):\n", tasks, reps);
+    printf("drain of %u tasks, median of %d reps each (ABAB, %d warmup "
+           "pairs discarded), poll-every=%d:\n",
+           tasks, reps, warmPairs, pollEvery);
     printf("  poll ON : %.3f ms\n  poll OFF: %.3f ms\n", p, n);
     printf("  polling overhead: %.2f%%  (N1 cost threshold: 10%%)\n",
            (p / n - 1.0) * 100.0);
@@ -388,6 +448,15 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaFree(dOut));
   }
 
+  if (blocks > sms * maxPerSM) {
+    fprintf(stderr,
+            "ERROR: %d blocks > %d residency slots; in unbounded latency "
+            "mode the excess blocks never run and every event is an "
+            "anomaly. Refusing.\n",
+            blocks, sms * maxPerSM);
+    return 1;
+  }
+
   // Event schedule: cumulative gaps, U(gapMin, gapMax), fixed seed.
   std::mt19937 rng(21);
   std::uniform_real_distribution<double> gapDist(gapMinUs * 1000.0,
@@ -440,13 +509,14 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemcpy(hClaim.data(), dClaim, evAlloc * sizeof(int),
                         cudaMemcpyDeviceToHost));
 
-  std::vector<double> lat, spread, e2e, firstDelay;
-  int anomalies = 0, unset = 0;
+  std::vector<double> lat, latX0, spread, e2e, firstDelay, b0Delay;
+  int anomalies = 0, unset = 0, lastIsSetter = 0;
   FILE* csv = csvPath[0] ? fopen(csvPath, "w") : nullptr;
   if (csv)
     fprintf(csv,
             "event,set_ns,first_obs_ns,last_obs_ns,lat_us,spread_us,"
-            "claimer,e2e_us,complete\n");
+            "claimer,e2e_us,complete,last_block,block0_delay_us,"
+            "lat_excl_setter_us\n");
   for (int e = 0; e < events; ++e) {
     long long setNs;
     if (devSet) {
@@ -455,41 +525,58 @@ int main(int argc, char** argv) {
     } else {
       setNs = hSet[e] + offP50;  // host clock mapped onto globaltimer
     }
-    long long lo = 0, hi = 0;
-    int seen = 0;
+    long long lo = 0, hi = 0, hiExcl0 = 0;
+    int seen = 0, lastBlock = -1;
     for (int b = 0; b < blocks; ++b) {
       const long long o = hObs[(size_t)e * blocks + b];
       if (o == 0) continue;
       ++seen;
       lo = (lo == 0 || o < lo) ? o : lo;
-      hi = std::max(hi, o);
+      if (o > hi) { hi = o; lastBlock = b; }
+      if (b > 0 && o > hiExcl0) hiExcl0 = o;  // setter-excluded max
     }
     const bool complete = (seen == blocks);
     if (!complete) { ++anomalies; }
     const double latUs = (hi - setNs) / 1e3;
+    const double latX0Us = (hiExcl0 - setNs) / 1e3;
     const double spreadUs = (hi - lo) / 1e3;
+    const double b0Us = (hObs[(size_t)e * blocks + 0] - setNs) / 1e3;
     const double e2eUs =
         hClaim[e] ? (hUGT[2 * (size_t)e + 1] - setNs) / 1e3 : -1.0;
-    if (complete) {
+    if (complete && e >= warmupEvents) {  // audit: discard warmup events
       lat.push_back(latUs);
+      latX0.push_back(latX0Us);
       spread.push_back(spreadUs);
       firstDelay.push_back((lo - setNs) / 1e3);
+      b0Delay.push_back(b0Us);
+      if (devSet && lastBlock == 0) ++lastIsSetter;
       if (e2eUs >= 0) e2e.push_back(e2eUs);
     }
     if (csv)
-      fprintf(csv, "%d,%lld,%lld,%lld,%.2f,%.2f,%d,%.2f,%d\n", e, setNs, lo,
-              hi, latUs, spreadUs, hClaim[e] - 1, e2eUs, complete ? 1 : 0);
+      fprintf(csv, "%d,%lld,%lld,%lld,%.2f,%.2f,%d,%.2f,%d,%d,%.2f,%.2f\n",
+              e, setNs, lo, hi, latUs, spreadUs, hClaim[e] - 1, e2eUs,
+              complete ? 1 : 0, lastBlock, b0Us, latX0Us);
   }
   if (csv) fclose(csv);
 
-  printf("\n--- latency (%s-set): %zu complete events (%d anomalies, %d "
-         "unset) ---\n",
-         setBy.c_str(), lat.size(), anomalies, unset);
+  printf("\n--- latency (%s-set, poll-every=%d, %d blocks): %zu events "
+         "(%d warmup discarded, %d anomalies, %d unset) ---\n",
+         setBy.c_str(), pollEvery, blocks, lat.size(),
+         std::min(warmupEvents, events), anomalies, unset);
+  if (devSet && !lat.empty())
+    printf("setter (block 0) was last observer in %.1f%% of events; its own "
+           "delay p50 %.2f us\n",
+           100.0 * lastIsSetter / lat.size(), percentile(b0Delay, 0.5));
   if (!lat.empty()) {
     printf("preemption latency set->last (us): p50 %.2f | p90 %.2f | p99 "
            "%.2f | max %.2f\n",
            percentile(lat, 0.5), percentile(lat, 0.9), percentile(lat, 0.99),
            *std::max_element(lat.begin(), lat.end()));
+    if (devSet)
+      printf("  excluding setter block 0:       p50 %.2f | p90 %.2f | p99 "
+             "%.2f (setter self-delay is a design artifact)\n",
+             percentile(latX0, 0.5), percentile(latX0, 0.9),
+             percentile(latX0, 0.99));
     printf("first observer delay (us):        p50 %.2f | p99 %.2f\n",
            percentile(firstDelay, 0.5), percentile(firstDelay, 0.99));
     printf("observation spread first->last (us): p50 %.2f | p99 %.2f\n",

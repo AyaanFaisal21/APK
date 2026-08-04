@@ -303,3 +303,113 @@ blocks logged truthfully); overhead A/B fairness (same grid/residency,
 template strips the poll, ABAB interleave); float64 verification math; NaN
 and log-sentinel guards; idempotent duplicate tile writes; counter overflow
 margins; CLAIM.md untouched since data collection began.
+
+## 2026-08-04 — Phase 4: the surface, written and predicted
+
+**Doing:** sweep resident blocks {16, 36, 72, 144, 216, 288} × poll period
+{1, 2, 4, 8 boundaries} — 24 cells, each with 10k dev-set events (+100
+warmup, discarded) and a 20-rep ABAB overhead pair (2 warmup pairs
+discarded; tasks scaled ~700/block so per-rep wall stays constant). Audit
+changes wired in: per-event argmax block and block-0 self-delay now logged,
+so the setter phase-lock caveat gets quantified instead of hand-waved.
+Adaptive polling dropped from the plan: at 0.80% overhead for poll-every-1
+there is nothing for adaptivity to save; the k-sweep exists to show the
+latency cost of skipping checks, not to find a sweet spot.
+
+**Predicted:** *Overhead surface ≈ flat and boring*: ≤1% everywhere,
+decreasing with k, no strong block-count dependence (one L2 read per k
+tiles per block cannot move a compute-bound drain). *Latency vs blocks at
+k=1 is the A-N1 verdict and I predict A-N1 fails in an interesting way*:
+p50 grows ~13 → ~59 μs from 16 → 288 blocks, but the growth lives entirely
+in the tile term — max in-flight wall stretches with SM co-residency
+(measured: solo p50 10.3, 4-way wall p99 57.6) — while the check epoch
+(first-observer delay, and lat minus max-wall) stays ~1–3 μs at every
+block count: <25% of median tile and <2× growth 16→288. So naive
+independent polling on Ampere is **tile-bound, not propagation-bound**, and
+the degradation with worker count is contention physics, not flag
+propagation — the opposite localization from what A-N1 (via ExpertPlex's
+Hopper reasoning) expects. *Poll period*: latency p50 grows ≈ +(k−1)/2 ×
+mean wall per skipped boundary (at 288 blocks: ~59, ~70, ~95, ~145 μs for
+k=1,2,4,8); overhead saved is ≪0.5 points — poll-every-1 strictly
+dominates. *Setter*: block 0 is last observer in ≪5% of events at 288
+(its one-tile self-delay ~p50 of wall ≈ 17–25 μs, far below the 58 μs
+max-of-288), rising at 16 blocks where fewer rivals exist. If instead the
+epoch grows with blocks or block 0 dominates the max, my Phase 3 story is
+wrong and the notebook says so.
+
+**Got:** *(pending)*
+
+**Surprised by:** *(pending)*
+
+**Next:** run `scripts/phase4.sh`, build the figure, file the N1/A-N1
+verdict against the pre-registered thresholds.
+
+**Got:** three instrument battles before the data could be trusted, then a
+clean 24-cell surface with **0 anomalies** anywhere.
+
+*Subverted problem #4 — occupancy is not a constant of the source tree.*
+The first sweep silently compiled to **3 blocks/SM** (the poll-period
+parameter added register pressure), so `--blocks 288` orphaned 72 blocks
+that never became resident: 10,000/10,000 events flagged anomalous at 288.
+The anomaly counter caught it; Phase 3's binary genuinely was 4/SM and its
+numbers stand. Fixes: `__launch_bounds__(THREADS, 4)` makes residency a
+compile-time contract; latency mode now refuses grids larger than residency.
+
+*Subverted problem #5 — the pin then manufactured a fake overhead.* Under
+the 64-reg cap the POLL variant spilled (36 B stores/tile) while POLL=false
+did not; solo-occupancy cells read ~10% "overhead" that was really
+asymmetric spill traffic, nearly independent of poll period — the tell.
+Templating the poll period and moving thread-0 bookkeeping to shared cut it
+to 8 B; and resurrecting the *committed Phase 3 binary* from git showed its
+POLL variant had spilled 16 B all along (its 0.82% at 288 blocks reproduces
+Phase 3's 0.80% exactly). Conclusion, worth stating in the writeup: **there
+is no spill-free poll variant at 4 blocks/SM — the register cost of yield
+machinery at the occupancy cliff is part of the mechanism's price on
+sm_86**, and it hides under co-residency (≤1% at 288) but shows at solo
+occupancy (≤3.4% worst measured across three builds).
+
+*Subverted problem #6 — grid == SM count is a bistable shape.* B=72
+overhead swung ±10–12% between runs; raw drains are bimodal (7.1 vs 8.0 ms,
+sticky per launch sequence) — block placement sometimes doubles up SMs and
+idles others at exactly 1 block/SM. B=72 overhead is excluded with cause;
+B<72 and B≥144 are tight (±0.15–2%).
+
+The surface (`results/summary/phase4_surface.csv`, figure alongside),
+setter-excluded latency p50/p99 at poll-every-1:
+16 → 8.2/11.3 μs · 36 → 10.2/11.3 · 72 → 11.3/12.3 · 144 → 16.4/20.5 ·
+216 → 33.8/41.0 · 288 → 68.6/90.1. Latency ≈ ×k for poll-every-k at every
+block count (at 288: 68.6 → 133 → 262 → 520 μs). First-observer delay p50
+stays 1–3 μs at every cell. Setter-last%: 89.6% at 16 blocks → 0% at ≥144 —
+the audit's caveat was real and is now excluded by construction.
+
+**The pre-registered verdict (thresholds from CLAIM.md, unmoved):**
+- *Cost axis:* every clean cell across three builds ≤ 3.4%, vs the 10%
+  falsifier → **N1 holds**.
+- *Propagation-bound test:* check epoch (first-observer) p50 1–3 μs; it
+  *shrinks* 16→72 (3.1 → 1.0 μs), nowhere near the >2× growth A-N1
+  requires → **A-N1's scaling clause fails; N1 holds**. One honest wrinkle:
+  at B=16 the 25%-of-tile clause technically trips (3.07/10.24 = 30%) —
+  but the cause is the 1.024 μs `%globaltimer` quantum (all values are
+  multiples of it; instrument resolution, discovered this session) plus
+  sparse pollers, not propagation, and the clause was written to detect
+  propagation. Reported as a threshold-crossing with cause, not hidden.
+- *The real Ampere story:* latency grows 8.4× from 16→288 blocks, but the
+  growth is entirely the **tile term stretching under SM co-residency**
+  (walls: 10.3 μs solo → p99 57.6 μs at 4-way), while the check epoch stays
+  flat. ExpertPlex's Hopper reasoning localizes preemption cost in
+  propagation; on Ampere it lives in contention. Bounded tile-level
+  preemption generalizes below Hopper — with the bound denominated in
+  *contention-stretched* tile time.
+
+**Surprised by:** (1) Saturation-point latency is build-sensitive: p50 at
+288 blocks spanned 54.3 → 59.4 → 68.6 μs across three code variants of the
+same mechanism (shared-memory bookkeeping shifts tile walls). B ≤ 144 cells
+reproduce to the quantum across builds. Quote the 288 number as a range
+with build caveat, never as a point. (2) The globaltimer quantum (1.024 μs)
+— the audit had waved at "ns granularity"; wrong, and it sets the floor on
+the epoch measurement. (3) Overhead at high residency is ~0 within noise —
+polling is not merely cheap, it is *hidden* by co-resident warps.
+
+**Next:** Phase 5 — the safety question: deliberately yield mid-pipeline on
+`sm_86` and check float64 correctness; ExpertPlex's unsafety claim may not
+carry to an architecture without cross-CTA pipelining.
