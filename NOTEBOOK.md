@@ -237,3 +237,69 @@ test (does it grow >2× from 16→288 blocks?) is Phase 4's axis.
 **Next:** Phase 4 — the surface: polling period × resident block count
 (extend the sweep past ROADMAP's 72 to 288, where residency actually
 saturates), overhead and latency per cell. Then the A-N1 verdict.
+
+## 2026-08-04 — Audit of Phases 1–3 (pre-Phase-4 checkup)
+
+Full re-read of code, claims, and methodology, plus validation runs.
+Original entries above stay as written; errors are amended here, dated,
+per the CLAIM.md convention.
+
+**Errors found in the write-ups (measured numbers unaffected):**
+
+1. *Phase 1 "≈38% of fp32 peak" is wrong — it is ≈19%.* The prediction
+   contained an arithmetic error carried into the outcome: a K=128 tile is
+   2·64·64·128 = **1.05 MFLOP**, not 2.10. The binary always used the
+   correct formula (printed GFLOP/s are right); only the notebook's
+   efficiency claim doubled it. Corrected: 59 GFLOP/s/SM ≈ 19% of the
+   307 GFLOP/s per-SM peak at 1200 MHz — **worse** than the 25–35% guess,
+   not "slightly better." The flattering conclusion survived because it
+   flattered; that is exactly what this audit is for.
+2. *Phase 1 "fixed-size tail" is wrong.* p99/p50 across K = 32…512 is
+   1.24, 1.27, 1.24, 1.21, 1.04 — a **proportional ~24% tail through
+   K=256** that collapses only at K=512. Not a fixed-size tail, and not
+   monotone shrinkage.
+3. *Phase 3 "47×" has an endpoint mismatch.* Baseline e2e is host-arrival →
+   host-observed completion (includes launch + sync legs); Phase 3 e2e is
+   device-set → device-done. Order of magnitude stands; apples-to-apples
+   (adding ~10 μs of host legs) is ≈30×. Report both going forward.
+4. *Phase 2 baseline p99 was under-sampled.* n=500 → n=2000 on the
+   race-fixed binary: p99 1436 → **1476 μs** (+2.8%); p50 957.3 → 957.5
+   (stable to 0.02% across sessions — good reproducibility datapoint).
+   Verification also re-passes post-race-fix, re-legitimizing Phase 2.
+
+**Validation runs:**
+
+- *Tile-wall distribution at 288 blocks* (`audit_tilewall_288.csv`,
+  n=9216): min 10.7 / p50 17.0 / p90 41.9 / **p99 57.6 / max 66.2 μs** —
+  heavy-tailed, p99/p50 = 3.4. Phase 3's observation spread p50 (58.4 μs)
+  sits on the wall p99 (57.6 μs), as max-of-~288-in-flight predicts. The
+  "latency = worst in-flight co-resident tile" interpretation is now
+  **measured, not inferred**.
+- *Clock under this load class:* 1200 MHz held.
+
+**Caveats carried to Phase 4 (design changes queued):**
+
+- Dev-set setter is phase-locked to block 0's boundaries: block 0's own
+  observation is always ≈ one full tile after set, which could prop up the
+  floor. Host-set agreement at p50 says the max is usually another block,
+  but Phase 4 must log the argmax block id + block 0's own delay to
+  quantify it.
+- "Saturated" is kernel-shape-specific (registers bind: 4 × 256 threads ×
+  ~60 regs). A much smaller urgent kernel might co-schedule even at "sat";
+  the 957 μs baseline applies to same-shape urgent work. (The gap = −23.6 μs
+  proves this tile could not fit — claim scoped, not falsified.)
+- Hygiene gaps vs ROADMAP: no CPU pinning / governor control on the rental
+  — affects host-side timestamps only; all Phase 3 headline numbers are
+  %globaltimer (wall ns) and SM-clock-independent by construction, which is
+  worth stating as a design property. No warmup discard in Phase 3
+  overhead/latency modes (medians robust; add warmups anyway). No Nsight
+  timeline captured yet — do one profiled (non-timing) run in Phase 4.
+- Overhead 0.80% is one cell (K=64, 288 blocks, poll-every-tile); the
+  Phase 4 surface scopes it.
+
+**Checked and sound:** barrier logic around `s_task`/`s_flag` (uniform
+branches, no divergent `__syncthreads`); missed-event obs semantics (late
+blocks logged truthfully); overhead A/B fairness (same grid/residency,
+template strips the poll, ABAB interleave); float64 verification math; NaN
+and log-sentinel guards; idempotent duplicate tile writes; counter overflow
+margins; CLAIM.md untouched since data collection began.
