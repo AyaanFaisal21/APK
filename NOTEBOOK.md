@@ -159,3 +159,81 @@ naively for `sat`.
 boundaries, preemption latency (flag set → last worker switched) and
 steady-state polling overhead vs this baseline. The number to beat is
 957 μs p50 / 1436 μs p99; the floor is one tile (~25 μs co-resident).
+
+## 2026-08-04 — Phase 3: the naive yield, written and predicted
+
+**Doing:** `src/yield.cu` — global device-memory flag, every block polling
+independently at its own task boundary (the exact mechanism ExpertPlex calls
+unsafe; safety is Phase 5, this is cost and latency). One long-running
+kernel hosts all 10k events. Set-instant timestamped two ways that must
+agree up to PCIe visibility: `--set dev` (block 0 sets the flag at scheduled
+instants, logs `%globaltimer` at the write — same clock as the observers,
+zero cross-domain error; primary) and `--set host` (the CLAIM.md wording;
+host `steady_clock` mapped onto `%globaltimer` via a 300-rep spin-kernel
+calibration, measured idle — stated limitation). Claimer block executes the
+urgent tile for e2e comparability with Phase 2. Overhead mode: ABAB
+interleaved drains of 200k tasks, poll on/off, 20 reps each.
+
+**Predicted:** overhead: one volatile L2 read per ~25 μs co-resident tile →
+**≤ 1.5%**, far under the 10% falsifier. Latency (dev-set, 288 blocks,
+K=64): bound is one residual tile + check epoch; last-of-288 residual ≈ a
+full co-resident tile → **p50 ≈ 22–28 μs, p99 ≈ 38–50 μs** (tile p99 tail ×
+max-of-288 pushes it above the single-tile p99). First-observer delay ≈
+tile/288 ≈ sub-μs. Spread ≈ latency (first observer ~immediate, last ≈ full
+tile). Host-set latency = dev-set + calibration residual: within **±5 μs**
+of dev-set if the idle-measured offset (predicted p50 ≈ 8–15 μs, PCIe write
++ memcpyAsync enqueue) survives load. e2e set→urgent-done ≈ first-observer
++ exec ≈ **30–45 μs vs 957 μs baseline, ~25×**. Anomalies (block missing an
+event at 150–400 μs gaps): zero. Verify passes; sanitizer clean.
+
+**Got:** first full-size verify run FAILED with all 9.4M elements NaN —
+*subverted problem #2, caught by its own guard.* `cudaMemset`'s fill runs as
+a kernel; null-stream work does not order against a non-blocking stream; and
+a **saturated persistent grid blocks the fill kernel outright** (Phase 2's
+own lesson, biting the harness). The 0xFF fill therefore executed *after*
+the drain and erased every result. It passed under compute-sanitizer
+(serialized execution) and Phase 2 dodged it by launch timing — a race that
+was always there. Fix: explicit `cudaDeviceSynchronize()` between guard
+fills and launch, applied to both binaries. Without the NaN guard this would
+have been invisible or, worse, a silent stale-data pass.
+
+After the fix: verify PASS (max rel err 2.97e-06), sanitizer clean, 10,000
+events per set mode, **0 anomalies, 0 unset**.
+
+**The two numbers (288 blocks, K=64, ~25.4 μs mean co-resident tile):**
+- **Polling overhead: 0.80%** (17.905 vs 17.763 ms median drain, ABAB ×20).
+  N1's cost axis holds with 12× margin over the 10% falsifier.
+- **Preemption latency (dev-set, primary): p50 59.4 / p90 64.5 / p99 70.7 /
+  max 81.9 μs.** Decomposition: first observer 1.02 μs p50; the rest is
+  observation spread (58.4 μs p50) — i.e. waiting for the *slowest in-flight
+  tile*. Even p01 is 51 μs: this is the floor, not a tail.
+- Urgent e2e set→done: **20.5 μs p50 / 35.8 p99 vs 957/1436 baseline — 47×.**
+  Note e2e < latency: the first observer claims and finishes the urgent tile
+  while stragglers are still reaching their boundaries. "Urgent served" and
+  "kernel fully redirectable" are different quantities; ExpertPlex's bound
+  concerns the latter.
+
+**Host-set vs dev-set:** host-set read p50 49.1 μs with first-observer delay
+**−9.7 μs** — physically impossible, so the idle-measured calibration offset
+is ~10 μs too large (likely PCIe link-power wake on an idle link; under load
+the link is hot). Corrected: 49.1 + 9.7 = 58.8 vs dev 59.4 — **agreement
+within 0.6 μs**. The dual-instrument design paid for itself; dev-set is the
+primary number, and idle calibrations do not transfer to loaded runs
+(subverted problem #3, the plausible-wrong-number kind — host-set alone
+would have quietly reported 17% better latency). Cosmetic: the calibration
+print shows raw epoch offsets (~1.8e15 μs); print deltas next time.
+
+**Surprised by:** latency is **2.2× the prediction** (59 vs 22–28 μs), and
+the reason is a real finding: the "one tile execution" term in the
+preemption bound is not the mean tile time but the **max over all in-flight
+co-resident tiles**. At 4-way SM sharing, individual tile walls spread far
+beyond the 25.4 μs throughput average (the max of 288 residuals sits at
+~58 μs, ~2.3× mean). ExpertPlex's 2.2–25.3 μs tile-boundary figure is a
+*boundary-interval* statistic; the bound's effective tile term at
+saturation is the contention-stretched worst case. Check epoch (~1 μs) is
+currently ≪ 25% of tile time — N1 holds at this block count; the scaling
+test (does it grow >2× from 16→288 blocks?) is Phase 4's axis.
+
+**Next:** Phase 4 — the surface: polling period × resident block count
+(extend the sweep past ROADMAP's 72 to 288, where residency actually
+saturates), overhead and latency per cell. Then the A-N1 verdict.

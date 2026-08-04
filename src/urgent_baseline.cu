@@ -221,6 +221,9 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemset(dC, 0xFF, (size_t)M * N * sizeof(float)));
     CUDA_CHECK(cudaMemset(dCu, 0xFF, (size_t)TM * TN * sizeof(float)));
     reset_run(bgStream);
+    // Null-stream fills don't order against non-blocking streams, and a
+    // saturated grid blocks the fill kernel outright; sync before launch.
+    CUDA_CHECK(cudaDeviceSynchronize());
     launch_bg();
     urgent_tile<<<1, THREADS, 0, uStream>>>(dA, dB, dCu, K, N, dUStart, dUEnd);
     CUDA_CHECK(cudaDeviceSynchronize());

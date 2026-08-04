@@ -2,7 +2,7 @@
 
 **The question:** ExpertPlex achieves bounded tile-level preemption inside a persistent kernel using Hopper thread-block clusters, distributed shared memory, and TMA multicast. None of those exist below `sm_90`. What preemption granularity and overhead are achievable without them?
 
-**Status as of 2026-08-04:** **Phases 1–2 complete.** Phase 1: persistent kernel runs on the A10, sanitizer-clean, float64-verified; tile duration tunable via K (6.7–17.8 μs in-band for K ∈ {32, 64, 128} at 1200 MHz; the 150 W cap throttles through higher clock locks — see NOTEBOOK). Phase 2: the drain-time baseline is measured — with all 288 residency slots occupied, an urgent tile waits **957 μs p50 / 1436 μs p99** (= remaining drain, corr 0.9934); with even one slot open, 76 μs; the floor is one co-resident tile (~25 μs). That ~50–90× gap is what Phase 3's yield has to close.
+**Status as of 2026-08-04:** **Phases 1–3 complete.** Phase 1: calibrated tile (K ∈ {32, 64, 128} → 6.7–17.8 μs at 1200 MHz; higher clock locks throttle at the 150 W cap). Phase 2: drain-time baseline — saturated residency makes an urgent tile wait **957 μs p50** (= remaining drain, corr 0.9934); one open slot collapses it to 76 μs. Phase 3: the naive independent yield costs **0.80% steady-state overhead** (falsifier: 10%) and preempts in **59.4 μs p50 / 70.7 μs p99** over 10k device-timestamped events — urgent e2e 20.5 μs, **47× over baseline**. The latency is not one mean tile but the max in-flight co-resident tile (~2.3× mean); the check epoch itself is ~1 μs. N1 holds so far; the block-count scaling axis is Phase 4.
 
 **Hardware:** NVIDIA A10 (GA102, `sm_86`, CC 8.6, 24 GB GDDR6, ~600 GB/s, 72 SMs).
 
