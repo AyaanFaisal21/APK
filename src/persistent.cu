@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <cuda_runtime.h>
 
+#include "tile.cuh"
+
 #define CUDA_CHECK(call)                                                      \
   do {                                                                        \
     cudaError_t err_ = (call);                                                \
@@ -37,38 +39,11 @@
     }                                                                         \
   } while (0)
 
-// Tile geometry. TM x TN output tile per task, K consumed in KB-wide chunks.
-// 256 threads as a 16x16 grid, each thread owning a 4x4 micro-tile.
-constexpr int TM = 64;
-constexpr int TN = 64;
-constexpr int KB = 32;
-constexpr int THREADS = 256;
-
-struct TileRecord {
-  long long start;   // clock64() at tile start (after queue pop)
-  long long end;     // clock64() after the block-wide barrier at tile end
-  int smid;
-  int block;
-};
-
-__device__ __forceinline__ unsigned smid_of() {
-  unsigned id;
-  asm("mov.u32 %0, %%smid;" : "=r"(id));
-  return id;
-}
-
 __global__ void __launch_bounds__(THREADS) persistent_gemm(
     const float* __restrict__ A, const float* __restrict__ B,
     float* __restrict__ C, int K, int N, int tilesN, int numTasks,
     unsigned int* nextTask, TileRecord* log) {
-  // +1 padding on the leading dimension so column reads of As and the
-  // strided reads of Bs don't all land in one bank.
-  __shared__ float As[TM][KB + 1];
-  __shared__ float Bs[KB][TN + 1];
   __shared__ unsigned s_task;
-
-  const int tx = threadIdx.x % 16;  // micro-tile column group
-  const int ty = threadIdx.x / 16;  // micro-tile row group
 
   while (true) {
     if (threadIdx.x == 0) s_task = atomicAdd(nextTask, 1u);
@@ -81,42 +56,7 @@ __global__ void __launch_bounds__(THREADS) persistent_gemm(
 
     const int rowBase = (task / tilesN) * TM;
     const int colBase = (task % tilesN) * TN;
-
-    float acc[4][4] = {};
-
-    for (int k0 = 0; k0 < K; k0 += KB) {
-      for (int i = threadIdx.x; i < TM * KB; i += THREADS) {
-        const int r = i / KB, c = i % KB;
-        As[r][c] = A[(long long)(rowBase + r) * K + (k0 + c)];
-      }
-      for (int i = threadIdx.x; i < KB * TN; i += THREADS) {
-        const int r = i / TN, c = i % TN;
-        Bs[r][c] = B[(long long)(k0 + r) * N + (colBase + c)];
-      }
-      __syncthreads();
-
-#pragma unroll
-      for (int kk = 0; kk < KB; ++kk) {
-        float a[4], b[4];
-#pragma unroll
-        for (int i = 0; i < 4; ++i) a[i] = As[ty * 4 + i][kk];
-#pragma unroll
-        for (int j = 0; j < 4; ++j) b[j] = Bs[kk][tx * 4 + j];
-#pragma unroll
-        for (int i = 0; i < 4; ++i)
-#pragma unroll
-          for (int j = 0; j < 4; ++j) acc[i][j] = fmaf(a[i], b[j], acc[i][j]);
-      }
-      __syncthreads();
-    }
-
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      const long long r = rowBase + ty * 4 + i;
-#pragma unroll
-      for (int j = 0; j < 4; ++j)
-        C[r * N + (colBase + tx * 4 + j)] = acc[i][j];
-    }
+    tile_gemm(A, B, C, K, N, rowBase, colBase, N, rowBase, colBase);
 
     __syncthreads();  // whole tile committed before the clock closes
     const long long t1 = clock64();

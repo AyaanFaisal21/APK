@@ -2,7 +2,7 @@
 
 **The question:** ExpertPlex achieves bounded tile-level preemption inside a persistent kernel using Hopper thread-block clusters, distributed shared memory, and TMA multicast. None of those exist below `sm_90`. What preemption granularity and overhead are achievable without them?
 
-**Status as of 2026-08-04:** **Phase 1 complete.** Persistent kernel runs on the A10, sanitizer-clean, float64-verified at every point; tile duration is tunable via K (6.7–17.8 μs in-band for K ∈ {32, 64, 128} at 1200 MHz). Measurement clock is **1200 MHz, not the 1695 boost** — the 150 W cap throttles through higher locks (see NOTEBOOK 2026-08-04). Next: Phase 2.
+**Status as of 2026-08-04:** **Phases 1–2 complete.** Phase 1: persistent kernel runs on the A10, sanitizer-clean, float64-verified; tile duration tunable via K (6.7–17.8 μs in-band for K ∈ {32, 64, 128} at 1200 MHz; the 150 W cap throttles through higher clock locks — see NOTEBOOK). Phase 2: the drain-time baseline is measured — with all 288 residency slots occupied, an urgent tile waits **957 μs p50 / 1436 μs p99** (= remaining drain, corr 0.9934); with even one slot open, 76 μs; the floor is one co-resident tile (~25 μs). That ~50–90× gap is what Phase 3's yield has to close.
 
 **Hardware:** NVIDIA A10 (GA102, `sm_86`, CC 8.6, 24 GB GDDR6, ~600 GB/s, 72 SMs).
 

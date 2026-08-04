@@ -96,3 +96,66 @@ outgrows L2 reuse. Irrelevant to the band but a reminder that "tile duration
 **Next:** Phase 2 — the urgent-task arrival harness and the drain-time
 baseline. Knob range established: K ∈ {32, 64, 128} spans 6.7–17.8 μs;
 K≈192 should land ~25 μs if the band edge is ever needed.
+
+## 2026-08-04 — Phase 2: drain-time baseline, written and predicted
+
+**Doing:** `src/urgent_baseline.cu` — background persistent kernel (tasks
+cycle the tile grid, idempotent writes) + single-tile urgent kernel launched
+from the host on a max-priority stream at a random point in the drain
+(U(0.2, 0.8) of estimated drain, fixed seed). No preemption exists; measuring
+what the urgent task pays for that. All cross-kernel timing via
+`%globaltimer` (ns, coherent across SMs/kernels) — `clock64()` would be
+meaningless across two kernels on different SMs. Three grid shapes, because
+"the GPU is busy" is not one condition: `sat` (every residency slot filled —
+the true baseline), `sat-1` (exactly one slot open), `1persm` (Phase 1's
+72-block shape). Also refactored the tile into `src/tile.cuh`, shared by both
+binaries.
+
+**Predicted:** occupancy comes back 3 blocks/SM (register-bound) → 216 slots.
+Drain of 20k K=64 tasks ≈ 2.5–3.5 ms. `sat`: urgent e2e ≈ remaining drain at
+arrival — p50 ≈ 1.2–1.8 ms, i.e. **~100× the ~10–30 μs tile time**, scaling
+~1:1 with remaining tasks; gap (urgent start − bg last exit) within
+[−1 tile, +50 μs] — urgent may start slightly *before* full drain as blocks
+exit one by one at queue exhaustion. `sat-1`: e2e p50 ≈ 30–80 μs despite
+"100% utilization" — one open slot collapses the baseline; gap large
+negative. `1persm`: similar, 25–60 μs. Urgent exec: ~10 μs solo, 20–35 μs
+when sharing an SM with resident bg blocks. Stream priority does nothing in
+`sat` mode (priorities reorder pending blocks; they cannot evict resident
+ones).
+
+**Got:** sanitizer clean, both kernels float64-verified in every mode.
+Occupancy came back **4 blocks/SM → 288 slots** (predicted 3). 500 trials
+per mode, K=64, 20k bg tasks:
+
+| mode | blocks | e2e p50 | e2e p99 | gap p50 | urgent exec p50 |
+|---|---|---|---|---|---|
+| sat | 288 | **957 μs** | 1436 μs | −23.6 μs | 19.5 μs |
+| sat-1 | 287 | 76.3 μs | 95.9 μs | −954 μs | 64.5 μs |
+| 1persm | 72 | 26.1 μs | 32.5 μs | −1680 μs | 15.4 μs |
+
+The baseline claim holds exactly: in `sat`, corr(e2e, remaining tasks at
+arrival) = **0.9934**, slope 88.1 ns/task = remaining drain across 288
+workers. The urgent task pays the whole remaining queue, ~50–90× a tile
+time, and stream priority (−5 vs 0, confirmed set) does nothing about it.
+Gap distribution is tight around −24 μs: urgent starts about one
+co-resident-tile-time before the *last* bg block exits, as predicted.
+
+**Surprised by:** (1) Drain 1.66 ms, not the predicted 2.5–3.5 ms — and the
+reason is worth keeping: 4-way co-residency raises per-SM throughput ~1.7×
+over one block/SM (1persm drain 2.83 ms for identical work). The naive tile
+hides its own latency badly; co-residency does it for free. Consequence:
+Phase 3's resident-block sweep (16→72) changes *throughput*, not just
+propagation, and overhead percentages must be computed against same-shape
+baselines. (2) `sat-1` execution: the open slot let urgent start immediately
+(gap −954 μs) but the tile ran **64.5 μs vs 15.4 μs** in 1persm — 4×
+slower sharing an SM with 3 bg blocks. "Got scheduled" and "ran at speed"
+are different quantities; e2e still 12× better than sat. (3) The three
+modes span **26 → 76 → 957 μs** for the same urgent tile on the same "busy"
+GPU — residency shape, not utilization, is the entire story. Phase 1's
+72-block grid would have produced a baseline 37× too optimistic if used
+naively for `sat`.
+
+**Next:** Phase 3 — the naive yield: global flag, per-block polling at task
+boundaries, preemption latency (flag set → last worker switched) and
+steady-state polling overhead vs this baseline. The number to beat is
+957 μs p50 / 1436 μs p99; the floor is one tile (~25 μs co-resident).
