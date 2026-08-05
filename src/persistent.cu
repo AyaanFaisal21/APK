@@ -1,17 +1,27 @@
-// Phase 1 — minimal persistent kernel on sm_86.
+// Phase 1 — the minimal persistent kernel, and the tile calibrator every
+// later phase leans on.
 //
-// Grid is sized to the hardware (default: one block per SM), blocks never
-// exit; they pull tile tasks off a global queue via atomic fetch-add until
-// the queue drains. Each task is one TM x TN tile of a large SGEMM, with K
-// as the tile-duration tuning knob (target band: 2-25 us, per CLAIM.md).
+// Premise: a persistent kernel is a thread pool — blocks start once and
+// pull tile tasks off a global fetch-add queue until it drains. Each task
+// is one TM x TN tile of a large SGEMM (the tile itself lives in tile.cuh,
+// shared with the other binaries), with K as the duration knob. This file
+// established the K -> duration map (K in {32,64,128} spans 6.7-17.8 us at
+// 1200 MHz) that phase2/3/4 configs quote.
+//
+// Run it (scripts/calibrate.sh drives the sweep):
+//   ./bin/persistent --sm-clock-mhz 1200                 # headline config
+//   ./bin/persistent --blocks 288 --k 64 --verify 0      # co-residency walls
 //
 // Termination is by queue exhaustion, so correctness does not depend on all
 // blocks being co-resident: even if blocks serialized onto one SM the run
 // would still complete. No inter-block waiting exists in Phase 1 — deadlock
 // becomes possible only when dependencies enter the queue (later phases).
 //
-// Timing is on-device clock64() per tile (same-SM start/end, valid for
-// durations). Host wall time is reported separately via cudaEvents.
+// Timing is on-device clock64() per tile — same-SM start/end, valid for
+// durations, but cycles convert to us at the LOCKED clock, and a clock
+// lock is only evidence under load (the 150 W cap throttles straight
+// through a 1695 MHz lock; NOTEBOOK 2026-08-04). Pass the verified value
+// via --sm-clock-mhz. Host wall time is reported separately via cudaEvents.
 //
 // Guard against the Cornfield stale-buffer failure mode: C and the tile log
 // are filled with 0xFF bytes (NaN / -1 patterns) before every pass, so a
@@ -22,7 +32,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
-#include <string>
 #include <vector>
 #include <algorithm>
 #include <cuda_runtime.h>

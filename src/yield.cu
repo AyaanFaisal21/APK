@@ -1,33 +1,53 @@
-// Phase 3 — the naive yield, and the two numbers (ROADMAP Phase 3).
+// The measurement instrument for Phases 3 and 4: the naive yield, its two
+// numbers, and the block-count x poll-period surface built from them.
+//
+// Everything upstream feeds this file. persistent.cu calibrated the tile
+// (K -> duration), urgent_baseline.cu measured what preemption has to beat
+// (957 us drain at saturation); this binary measures the yield itself:
+//   1. Preemption latency: flag set -> last resident worker at a yield
+//      point (CLAIM.md definition). p99 over >= 10k events per cell.
+//   2. Steady-state overhead: drain time with polling on vs off, same
+//      grid shape, no events. CLAIM.md falsifies N1 above 10%.
 //
 // Mechanism under test: a global device-memory flag, each block polling
-// INDEPENDENTLY at its own task boundary (exactly what ExpertPlex calls
-// unsafe on Hopper; safety is Phase 5 — here we measure cost and latency).
+// INDEPENDENTLY at its own task boundary — exactly what ExpertPlex calls
+// unsafe on Hopper. Safety is Phase 5; here we measure cost and latency.
 //
-// The two numbers:
-//   1. Preemption latency: flag set -> last resident worker at a yield
-//      point (CLAIM.md definition). p99 over >= 10k events.
-//   2. Steady-state overhead: throughput with polling on vs off, same
-//      shape, no events. CLAIM.md falsifies N1 above 10%.
+// Run it (scripts/phase3.sh and scripts/phase4.sh drive these):
+//   ./bin/yield --mode verify   --tasks 20000            # float64 gate first
+//   ./bin/yield --mode overhead --tasks 200000 --reps 20 [--poll-every k]
+//   ./bin/yield --mode latency  --set dev --events 10000 [--blocks n]
 //
 // Timestamping the set-instant is the instrument problem. Two set modes,
-// which must agree up to PCIe visibility:
+// which must agree up to PCIe visibility (they do, within 0.6 us):
 //   --set dev   block 0 sets the flag at pre-scheduled instants and logs
-//               %globaltimer at the write. Same clock as observers, zero
-//               cross-domain error. The primary number.
+//               %globaltimer at the write. Same clock as the observers,
+//               zero cross-domain error. The primary number. Costs an
+//               artifact: block 0's own observation is phase-locked one
+//               tile behind its set, so the analysis reports latency both
+//               with and without the setter (lat_excl_setter_us).
 //   --set host  the host sets the flag (CLAIM.md's literal wording) via
 //               cudaMemcpyAsync; host steady_clock is mapped onto
-//               %globaltimer with a spin-kernel calibration (offset
-//               distribution reported; measured idle — stated limitation).
+//               %globaltimer with a spin-kernel calibration. The offset is
+//               measured on an idle GPU and runs ~10 us large under load
+//               (PCIe wake, NOTEBOOK 2026-08-04) — kept because the
+//               disagreement itself bounds the calibration error.
 //
 // Per event, every block logs its observation time; the claimer (atomicCAS)
-// executes the urgent tile so e2e is comparable with Phase 2's 957 us
-// baseline. Blocks then resume the background queue; no work is lost (the
-// popped task is executed after the yield point, not dropped).
+// executes the urgent tile so e2e is comparable with Phase 2's baseline.
+// Blocks then resume the background queue; no work is lost (the popped
+// task is executed after the yield point, not dropped). One long-running
+// kernel hosts all events (gaps >> latency, so events never overlap);
+// anomalies — a block missing an event — are counted, never blended.
 //
-// One long-running kernel hosts all 10k events (gaps >> latency so events
-// never overlap); anomalies (a block missing an event) are counted, not
-// silently blended.
+// Instrument lessons this file paid for, all NOTEBOOK 2026-08-04:
+//   - %globaltimer ticks in 1.024 us quanta on GA102. Nothing here can
+//     resolve below that; treat sub-quantum differences as noise.
+//   - Occupancy is not a constant of the source: a register bump silently
+//     dropped 4 blocks/SM to 3 and orphaned 72 of 288 blocks, hence the
+//     launch_bounds pin and the residency guard in latency mode.
+//   - grid == SM count is a bistable placement shape (bimodal drains 12%
+//     apart at exactly 72 blocks); don't trust A/B overhead there.
 
 #include <cstdio>
 #include <cstdlib>
@@ -442,9 +462,11 @@ int main(int argc, char** argv) {
     offMin = (long long)percentile(offs, 0.0);
     offP50 = (long long)percentile(offs, 0.5);
     offP90 = (long long)percentile(offs, 0.9);
-    printf("host->device flag visibility (globaltimer - host ns, %d reps): "
-           "min %.1f us | p50 %.1f | p90 %.1f\n",
-           calReps, offMin / 1e3, offP50 / 1e3, offP90 / 1e3);
+    // The absolute offset is dominated by the epoch difference between the
+    // two clocks and is meaningless to read; report jitter above the min.
+    printf("host->device flag visibility (%d reps, min-referenced): "
+           "p50 +%.1f us | p90 +%.1f us\n",
+           calReps, (offP50 - offMin) / 1e3, (offP90 - offMin) / 1e3);
     CUDA_CHECK(cudaFree(dOut));
   }
 

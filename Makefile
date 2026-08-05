@@ -1,3 +1,8 @@
+# Three binaries, one per measurement: persistent (Phase 1 tile calibration),
+# urgent_baseline (Phase 2 drain baseline), yield (Phases 3-4 instrument).
+# Everything targets the A10 (sm_86); -lineinfo so Nsight maps back to source.
+# `make sanitize` runs small configs under compute-sanitizer — do it after any
+# kernel edit, before trusting numbers.
 NVCC ?= nvcc
 ARCH ?= sm_86
 NVCCFLAGS = -O3 -arch=$(ARCH) -std=c++17 -lineinfo -Xcompiler -O3

@@ -1,5 +1,7 @@
 # Adaptive Persistent Kernels on Ampere
 
+> **Notice:** the most recent commit is a documentation/sanitization pass that has **not been compile-tested** — the A10 instance was released before the rebuild could run. The changes are headers and comments plus one `printf` and one removed unused include, but per this repo's own standard: run `make && make sanitize` on the next box before trusting a new measurement run. Every number published below predates this pass and stands as measured.
+
 **The question:** ExpertPlex achieves bounded tile-level preemption inside a persistent kernel using Hopper thread-block clusters, distributed shared memory, and TMA multicast. None of those exist below `sm_90`. What preemption granularity and overhead are achievable without them?
 
 **Status as of 2026-08-04:** **Phases 1–3 complete.** Phase 1: calibrated tile (K ∈ {32, 64, 128} → 6.7–17.8 μs at 1200 MHz; higher clock locks throttle at the 150 W cap). Phase 2: drain-time baseline — saturated residency makes an urgent tile wait **957 μs p50 / 1476 μs p99** (n=2000; = remaining drain, corr 0.9934); one open slot collapses it to 76 μs. Phase 3: the naive independent yield costs **0.80% steady-state overhead** (at K=64, 288 blocks, poll-every-tile; falsifier: 10%) and preempts in **59.4 μs p50 / 70.7 μs p99** over 10k device-timestamped events — urgent e2e 20.5 μs on device-timeline endpoints, ≈47× over baseline (≈30× with matched host-observed endpoints). The latency is the **max in-flight co-resident tile**, confirmed by direct measurement (tile-wall p99 at 4-way residency = 57.6 μs ≈ the observed 58.4 μs spread); the check epoch itself is ~1 μs. **Phase 4: the surface is measured and N1 holds on both pre-registered axes.** Across blocks {16…288} × poll period {1,2,4,8} (10k events/cell, 0 anomalies): overhead ≤ 3.4% worst-case across three builds (falsifier: 10%); the check epoch stays flat at 1–3 μs and *shrinks* 16→72 (A-N1 required >2× growth). Latency does grow 8.4× to saturation — but entirely through the tile term stretching under SM co-residency, not propagation. On Ampere, bounded tile-level preemption generalizes below Hopper, with the bound denominated in contention-stretched tile time. Figure and summary in `results/summary/`; the audit trail (6 subverted problems and counting) is in the NOTEBOOK. Next: Phase 5, the safety question.
@@ -16,8 +18,12 @@
 | [`ROADMAP.md`](ROADMAP.md) | Six phases, 5–8 weeks, on hardware already in hand |
 | [`NOTEBOOK.md`](NOTEBOOK.md) | Dated entries: prediction before each run, outcome after |
 | [`papers/`](papers/) | Nine PDFs plus a reading index (PDFs gitignored) |
-| [`src/persistent.cu`](src/persistent.cu) | Phase 1: persistent kernel, fetch-add queue, calibrated synthetic tile, float64-verified |
-| [`scripts/`](scripts/) | `lock_clocks.sh` (step zero on any rental) and `calibrate.sh` (K sweep) |
+| [`src/tile.cuh`](src/tile.cuh) | The synthetic tile all three binaries schedule and measure — the calibration unit |
+| [`src/persistent.cu`](src/persistent.cu) | Phase 1: persistent kernel, fetch-add queue, K→duration calibration, float64-verified |
+| [`src/urgent_baseline.cu`](src/urgent_baseline.cu) | Phase 2: the drain-time baseline across three residency shapes |
+| [`src/yield.cu`](src/yield.cu) | Phases 3–4: the yield instrument — latency (dual set modes), overhead, the sweep |
+| [`scripts/`](scripts/) | `lock_clocks.sh` (step zero on any rental), `calibrate.sh`, `phase2/3/4.sh` (one per measurement) |
+| [`results/summary/`](results/summary/) | Committed surface CSV + figure (raw per-event CSVs stay in gitignored `results/raw/`) |
 
 ## The shape of the result
 

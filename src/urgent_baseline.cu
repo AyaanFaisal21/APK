@@ -1,10 +1,16 @@
-// Phase 2 — the drain-time baseline (ROADMAP: "how long you wait when the
-// only option is to let the current work drain").
+// Phase 2 — the drain-time baseline: the number the yield has to beat
+// (ROADMAP: "how long you wait when the only option is to let the current
+// work drain").
 //
 // A persistent background kernel chews through a long queue of tiles. At a
 // random point an urgent single-tile kernel is launched from the host on a
 // max-priority stream. No preemption exists yet, so the urgent block runs
 // only when a residency slot frees up. The measurement is how long it waits.
+// Result on the A10: 957 us p50 at saturation, r=0.99 with remaining queue
+// — the figure yield.cu's e2e is compared against.
+//
+// Run it (scripts/phase2.sh drives all three shapes):
+//   ./bin/urgent_baseline --mode sat --trials 2000 --csv results/raw/x.csv
 //
 // The load-bearing subtlety: "the GPU is busy" is not one condition.
 //   --mode sat    grid = SMs x max resident blocks/SM  -> every residency

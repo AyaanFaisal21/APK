@@ -1,6 +1,13 @@
-// Shared tile machinery for all phases: one TM x TN SGEMM tile computed
-// cooperatively by THREADS threads, K as the duration knob (calibrated
-// 2026-08-04 at 1200 MHz: K=32 -> 6.7 us, K=64 -> 10.3 us, K=128 -> 17.8 us).
+// The synthetic tile — the one unit of work every binary in this repo
+// schedules, preempts, and measures. One TM x TN SGEMM tile computed
+// cooperatively by THREADS threads, K as the duration knob (calibrated by
+// persistent.cu, 2026-08-04 at 1200 MHz: K=32 -> 6.7 us, K=64 -> 10.3 us,
+// K=128 -> 17.8 us; solo-SM figures — 4-way co-residency stretches walls
+// to a 57.6 us p99, which is what preemption latency actually waits on).
+//
+// Changing anything here invalidates that calibration and every number
+// downstream of it. Recalibrate (scripts/calibrate.sh) before trusting a
+// sweep run against a modified tile.
 #pragma once
 #include <cuda_runtime.h>
 
