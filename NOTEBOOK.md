@@ -461,3 +461,42 @@ second physical A10 reproducing the surface is a result in itself.
 
 **Next:** when the box answers: rebuild, sanitize, reproduce one latency
 + one overhead cell, remove the README untested-notice. Then Phase 5.
+
+## 2026-08-06 — Sanitization pass verified; cross-instance reproduction
+
+**Doing:** the deferred hardware checks from audit #2, on a fresh
+`gpu_1x_a10` (a different physical card from every prior number). The
+lossy SSH path was bypassed by having the box clone the public GitHub
+repo and run the whole sequence detached under nohup.
+
+**Predicted:** build clean, sanitizer clean (the sanitization pass was
+comments plus one printf and one include). Reproduction within the
+documented ranges: Phase 1 K=128 p50 within a few percent of 17.77 μs;
+288-block latency p50 inside the 54–69 μs build/session range; overhead
+at saturation ~0.
+
+**Got:** all of it. Build clean; **compute-sanitizer 0 errors on all
+three binaries** — the README untested-notice is retired. Reproduction
+on the second card:
+
+| quantity | original | second A10 | delta |
+|---|---|---|---|
+| Phase 1 K=128 tile p50 / p99 | 17.77 / 22.01 μs | 18.05 / 22.10 μs | +1.6% / +0.4% |
+| float64 max rel err (same seed) | 5.307e-06 | 5.307e-06 | bit-identical |
+| 288-block latency p50 / p99 | 68.61 / 90.11 μs | 66.56 / 78.85 μs | inside range |
+| overhead at saturation, P=1 | −0.10% | −0.00% | ~0 both |
+| setter-last fraction at 288 | 0.0% | 0.0% | match |
+
+The tile agreement doubles as the under-load clock evidence: at an
+unlocked boost (1695) the tile would read ~12.6 μs; 18.05 μs is only
+consistent with the 1200 MHz lock holding.
+
+**Surprised by:** nothing in the numbers — the first fully boring run
+this project has had, which after five subverted problems is itself the
+news. Operational note for the log: Lambda reuses IPs (stale host key)
+and a freshly restarted instance passed small SSH bursts while stalling
+bulk transfers for ~15 minutes; clone-from-GitHub + nohup + short-burst
+polling is the resilient pattern for flaky rentals.
+
+**Next:** Phase 5 — the safety question (yield mid-pipeline, float64
+verdict), per the audit's remaining-work list.
