@@ -539,8 +539,80 @@ caveat as Phase 4 (compare within-binary only). Occupancy stays 4/SM
 the race window is too small at this tile size, not that no discipline
 is needed — widen the window (larger KBP) before concluding anything.
 
-**Got:** *(pending)*
+**Got:** two infrastructure subverted problems before any data, then one
+real kernel bug the instrument caught, then a clean 40k-event measurement.
 
-**Surprised by:** *(pending)*
+*Subverted problem #7 — a zero exit code over a lossy link is not
+delivery.* The first tar-pipe to the box "succeeded" but the files never
+arrived (discovered when `make` had nothing to do and phase5.sh didn't
+exist). Delivery is now checksum-gated: resend until the remote md5
+matches. The gated loop then failed **eight consecutive times** before one
+transfer landed intact — direct measurement of how often the old blind
+push was silently losing data.
 
-**Next:** run `scripts/phase5.sh` on the A10.
+*Subverted problem #8 — the barrier-divergence race.* First poison verify
+FAILED on the **background** C check (20,476 elements, whole tiles,
+plausible magnitudes) — corruption the poison cannot reach. Drain ×10
+then failed 5/10 runs the same way: the original drain PASS had been a
+coin flip (the Cornfield single-sample lesson, again, live). Structure
+dump: whole-tile garbage, not tile-0 data, not allocation-adjacent; more
+corrupt final tiles than events → blocks going *permanently* bad at an
+event. Cause: `checkpoint` compared **live** shared values
+(`s_flag <= s_lastSeen`) while thread 0 updates `s_lastSeen` inside the
+branch — a late warp could read the updated value, skip the branch its
+block entered, and split the block across two `__syncthreads` sites. On
+sm_70+ barriers match by arrival count, not location, so both halves
+release and the block runs permanently phase-shifted, emitting whole-tile
+garbage until the kernel ends. yield.cu always snapshotted between
+barriers (Phases 3–4 unaffected — verified by re-reading that path);
+midyield.cu regressed the pattern. Fix: barrier-protected snapshot.
+Validation: **21/21 clean runs** (P < 1e-6 under the old ~50% rate),
+poison gate still trips, sanitizer clean. This bug is itself a Phase 5
+result: a one-barrier omission in an independent-check protocol produced
+silent, stochastic, whole-tile corruption — the "independent checks are
+hard" claim is real on Ampere, but it lives in **control divergence**,
+not in the data races ExpertPlex's cluster reasoning is about.
+
+The measurement (10k events per discipline, 288 blocks, K=64, KBP=16):
+
+| discipline | corrupt urgent tiles | worst rel err | bg C |
+|---|---|---|---|
+| drain | **0 / 10,000** | 1.4e-06 | PASS |
+| naive | **0 / 10,000** | 1.4e-06 | PASS |
+| poison (control) | **10,000 / 10,000** | 9.9e-01 | PASS |
+
+Latency and cost:
+
+| poll granularity | lat p50 | lat p99 | first obs | overhead vs off |
+|---|---|---|---|---|
+| stage (mid-pipeline) | **18.43 μs** | **23.55 μs** | 2.05 μs | 5.02% |
+| boundary (whole-tile) | 50.18 μs | 58.37 μs | 3.07 μs | 2.04% |
+
+**The Phase 5 statement, with evidence:** per-block independent yield is
+sound on sm_86 — with the drain discipline, 0/10,000 mid-pipeline yields
+corrupted anything (95% CI < 3.7e-4), verified against float64. Stage-
+granularity checks put preemption at **18.4 μs p50 / 23.6 μs p99 at full
+saturation — inside ExpertPlex's 2.2–25.3 μs Hopper tile-boundary band —
+for 5% overhead**, breaking the whole-tile floor that bounded Phases 3–4.
+
+**Surprised by:** (1) `naive` at 0/10,000 — predicted 20–50%. The
+pre-registered risk note anticipated this reading: at this geometry the
+"outstanding" copy group was issued a full stage-compute (~5 μs) before
+the checkpoint, and cp.async copies land in well under a microsecond, so
+by the time the yield fires there is nothing actually in flight —
+`wait_group` bookkeeping outlives the physical hazard. The honest claim
+is scoped: no corruption **at this pipeline geometry**; a window-widening
+variant (larger copies, issue-adjacent checkpoints) is the follow-up
+before any stronger statement. Note the asymmetry: the data-race hazard
+never fired in 10k tries, while the control-divergence hazard fired in
+half of all runs — on Ampere the danger is not where the Hopper reasoning
+points. (2) Stage overhead 5.02% vs predicted ≤3.5% — under the 10%
+falsifier but a real miss; the checkpoint's snapshot barrier (the bug
+fix) is in the hot path at stage granularity, a correctness cost the
+overhead axis now honestly includes. (3) Boundary-poll latency on the
+pipelined tile is 50 μs vs the sync tile's 66-69 μs — pipelined tiles
+have tighter wall distributions (async staging smooths contention).
+
+**Next:** writeup. The arc is complete: baseline (957 μs) → boundary
+yield (~66 μs) → mid-pipeline yield (18.4 μs, Hopper-band) with the
+safety question answered and the hazard relocated from data to control.

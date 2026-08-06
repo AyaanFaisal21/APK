@@ -169,12 +169,25 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
 
   // Event checkpoint. Returns true (uniformly) when this block claimed the
   // event and must abandon + restart its tile. Non-claimers only log.
+  //
+  // The branch condition MUST be taken on a barrier-protected snapshot,
+  // never on live shared values: comparing s_flag/s_lastSeen directly was
+  // the Phase 5 corruption bug (NOTEBOOK 2026-08-06). Thread 0 updates
+  // s_lastSeen inside the branch, so a late-drifting warp reading the live
+  // value could skip the branch the rest of the block entered — splitting
+  // the block across two __syncthreads sites. On sm_70+ barriers match by
+  // arrival count, not location, so both halves release and the block
+  // continues permanently phase-shifted, emitting whole-tile garbage.
+  // yield.cu always snapshotted (Phases 3-4 unaffected); this file
+  // regressed the pattern and paid for it.
   auto checkpoint = [&](bool midPipeline) -> bool {
-    if (s_flag <= s_lastSeen) return false;
-    const long long g = globaltimer_ns();
     const int f = s_flag;
+    const int last = s_lastSeen;
+    __syncthreads();  // all threads hold the snapshot before tid0 may write
+    if (f <= last) return false;
+    const long long g = globaltimer_ns();
     if (threadIdx.x == 0) {
-      for (int e = s_lastSeen; e < f; ++e)
+      for (int e = last; e < f; ++e)
         obsGT[(size_t)e * gridDim.x + blockIdx.x] = g;
       s_claimed = (atomicCAS(&claim[f - 1], 0, (int)blockIdx.x + 1) == 0);
       s_lastSeen = f;
@@ -432,10 +445,14 @@ int main(int argc, char** argv) {
     std::vector<float> hC((size_t)M * N);
     CUDA_CHECK(cudaMemcpy(hC.data(), dC, hC.size() * sizeof(float),
                           cudaMemcpyDeviceToHost));
-    int bad = 0, nans = 0;
+    int bad = 0, nans = 0, badTiles = 0;
     double maxRel = 0.0;
     for (int tile = 0; tile < coveredTiles; ++tile) {
       const int r0 = (tile / tilesN) * TM, c0 = (tile % tilesN) * TN;
+      int tileBad = 0;
+      int si = -1, sj = -1;
+      float sGot = 0;
+      double sRef = 0;
       for (int i = 0; i < TM; ++i)
         for (int j = 0; j < TN; ++j) {
           double ref = 0.0;
@@ -446,11 +463,34 @@ int main(int argc, char** argv) {
           if (std::isnan(got)) { ++nans; continue; }
           const double err = std::fabs(got - ref);
           maxRel = std::max(maxRel, err / std::max(1.0, std::fabs(ref)));
-          if (err > atol + rtol * std::fabs(ref)) ++bad;
+          if (err > atol + rtol * std::fabs(ref)) {
+            ++bad;
+            if (tileBad++ == 0) { si = i; sj = j; sGot = got; sRef = ref; }
+          }
         }
+      // Corruption STRUCTURE is the diagnostic: whole-tile wrongness means
+      // stale/foreign staging; single-column means one poisoned B value;
+      // contents matching ref(tile0) means the urgent output was
+      // misdirected into C.
+      if (tileBad > 0 && badTiles++ < 10) {
+        int t0match = 0;
+        for (int i = 0; i < TM; ++i)
+          for (int j = 0; j < TN; ++j) {
+            const double err = std::fabs(
+                hC[(size_t)(r0 + i) * N + (c0 + j)] - refU[(size_t)i * TN + j]);
+            if (err <= atol + rtol * std::fabs(refU[(size_t)i * TN + j]))
+              ++t0match;
+          }
+        printf("  corrupt tile %d (r0=%d c0=%d): %d/%d bad | first at "
+               "(%d,%d) got %.6f want %.6f | matches ref(tile0): %d/%d\n",
+               tile, r0, c0, tileBad, TM * TN, si, sj, sGot, sRef, t0match,
+               TM * TN);
+      }
     }
-    printf("C check (%d tiles): %s — %d NaN, %d beyond tol, max rel %.3e\n",
-           coveredTiles, (nans || bad) ? "FAIL" : "PASS", nans, bad, maxRel);
+    printf("C check (%d tiles): %s — %d NaN, %d beyond tol in %d tiles, "
+           "max rel %.3e\n",
+           coveredTiles, (nans || bad) ? "FAIL" : "PASS", nans, bad, badTiles,
+           maxRel);
     return nans + bad == 0;
   };
 
