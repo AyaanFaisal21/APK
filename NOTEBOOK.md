@@ -413,3 +413,51 @@ polling is not merely cheap, it is *hidden* by co-resident warps.
 **Next:** Phase 5 — the safety question: deliberately yield mid-pipeline on
 `sm_86` and check float64 correctness; ExpertPlex's unsafety claim may not
 carry to an architecture without cross-CTA pipelining.
+
+## 2026-08-06 — Deep-dive audit #2 (pre-Phase-5), box migration pending
+
+Full re-derivation of every published number plus a fresh methodological
+sweep, prompted before Phase 5 work begins. CLAIM.md verified untouched
+since the scaffold commit (git history — the pre-registration stands).
+
+**Internal consistency: all cross-phase checks pass.**
+- Phase 1 K-sweep decomposes to ~3.0 μs fixed cost + 114–124 ns/K through
+  K=256 (the K=512 slope break is the documented L2-reuse falloff).
+- Phase 2's drain slope (88.1 ns/task × 288 = 25.4 μs/tile) matches Phase
+  4's co-resident walls; 1persm drain (2827 μs) matches Phase 1's solo
+  tile prediction (2869 μs) to 1.5%.
+- Phase 4 latency scales ×1.94–2.25 per poll-period doubling at every
+  block count, and B=16 excl-setter p50 (8.19 μs) sits below one solo
+  wall (10.33 μs), exactly where max-of-16 residuals belongs.
+
+**Two disclosure gaps found, now on the record:**
+1. *The overhead surface's poll-period axis is not interpretable as poll
+   rate.* At B=16/36, P=1 reads LOWER than P=2 (0.91% vs 1.93%) because
+   the PE=1 template variant spills 8 B while PE≥2 variants spill 16 B —
+   codegen, not polling. Only the P=1 columns (both binaries) are
+   apples-to-apples. The cost verdict already uses the worst case across
+   all variants (3.4%), so the verdict stands; the axis caveat must
+   appear in the writeup.
+2. *The check-epoch readings sit at instrument resolution.* Every
+   first-observer p50 is 1–3 quanta of the 1.024 μs globaltimer tick.
+   The honest A-N1 statement is "epoch ≤ ~3 μs at every block count,
+   growth below detectability" — not "the epoch shrinks." The A-N1
+   verdict is unchanged under any reading (no >2× growth is visible at
+   any resolution), but the earlier phrasing implied more precision than
+   the instrument has.
+
+**Judged sound on re-examination:** the latency definition (boundary
+observation = redirectable instant), setter exclusion, B=72 exclusion
+with cause, endpoint-mismatch disclosure (30× matched / 47× device),
+worst-case-across-builds overhead quoting, n≥10k for every quoted p99,
+scope conditions in CLAIM.md matching what was actually measured.
+
+**Blocked on hardware (new box 150.136.146.214 unreachable on port 22 —
+likely still provisioning or a firewall rule):** the sanitization-pass
+rebuild check (`make && make sanitize`), clock lock + under-load
+read-back on the new instance, and a cross-instance reproduction
+spot-check of the 288-block cell — worth doing regardless, since a
+second physical A10 reproducing the surface is a result in itself.
+
+**Next:** when the box answers: rebuild, sanitize, reproduce one latency
++ one overhead cell, remove the README untested-notice. Then Phase 5.
