@@ -500,3 +500,47 @@ polling is the resilient pattern for flaky rentals.
 
 **Next:** Phase 5 — the safety question (yield mid-pipeline, float64
 verdict), per the audit's remaining-work list.
+
+## 2026-08-06 — Phase 5: mid-pipeline yield safety, written and predicted
+
+**Doing:** `src/midyield.cu` — a cp.async double-buffered pipelined tile
+(KBP=16, two stages, one commit group per chunk; the sm_80+ staging real
+kernels use), persistent queue as before, dev-set events. At a forced
+yield the CLAIMER interrupts its own pipeline mid-flight — outstanding
+async copies targeting the very smem the urgent tile is about to use —
+and runs the urgent tile in that smem under one of three disciplines:
+`drain` (cp.async.wait_all + barrier first), `naive` (no wait; the
+in-flight group races the urgent staging), `poison` (drain, then corrupt
+one staged float — instrument control). The abandoned bg tile restarts
+from scratch, so C stays correct by construction in every discipline;
+the safety verdict lives entirely in the per-event urgent outputs, all
+10k of which are captured and checked against a float64 reference.
+Non-claimers only observe — one block per event tests the discipline.
+Stage-granularity polling also gives the latency payoff measurement vs
+boundary polling, and overhead runs {off, boundary, stage} complete the
+cost picture.
+
+**Predicted:** `drain`: **0/10,000 corrupt** (rule-of-three upper bound
+3.7e-4) — on sm_86 one wait instruction makes independent mid-pipeline
+yield safe, because nothing outside the CTA can hold a reference into
+its smem; the ExpertPlex hazard needs cluster-level coupling the
+hardware cannot express. `naive`: **20–50% corrupt** — the in-flight
+group targets buf0 half the time and lands within the urgent staging
+window most of that; nonzero is the load-bearing prediction (it
+reproduces the hazard class inside one CTA and proves the instrument
+sees real races, not just planted ones). `poison`: **100%**. C passes
+in all disciplines. Latency at 288 blocks, stage polling: **p50
+20–35 μs** vs ~55–75 μs boundary — mid-tile checks break the
+whole-tile floor; first-observer stays 1–2 quanta. Overhead vs poll-off
+on the pipelined tile: stage ≤ 3.5%, boundary ≤ 1.5%; same codegen
+caveat as Phase 4 (compare within-binary only). Occupancy stays 4/SM
+(16.5 KB smem, pinned launch bounds). Risk noted before running: if
+`naive` shows ZERO corruption at 10k events, the honest reading is that
+the race window is too small at this tile size, not that no discipline
+is needed — widen the window (larger KBP) before concluding anything.
+
+**Got:** *(pending)*
+
+**Surprised by:** *(pending)*
+
+**Next:** run `scripts/phase5.sh` on the A10.
