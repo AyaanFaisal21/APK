@@ -413,3 +413,206 @@ polling is not merely cheap, it is *hidden* by co-resident warps.
 **Next:** Phase 5 — the safety question: deliberately yield mid-pipeline on
 `sm_86` and check float64 correctness; ExpertPlex's unsafety claim may not
 carry to an architecture without cross-CTA pipelining.
+
+## 2026-08-06 — Deep-dive audit #2 (pre-Phase-5), box migration pending
+
+Full re-derivation of every published number plus a fresh methodological
+sweep, prompted before Phase 5 work begins. CLAIM.md verified untouched
+since the scaffold commit (git history — the pre-registration stands).
+
+**Internal consistency: all cross-phase checks pass.**
+- Phase 1 K-sweep decomposes to ~3.0 μs fixed cost + 114–124 ns/K through
+  K=256 (the K=512 slope break is the documented L2-reuse falloff).
+- Phase 2's drain slope (88.1 ns/task × 288 = 25.4 μs/tile) matches Phase
+  4's co-resident walls; 1persm drain (2827 μs) matches Phase 1's solo
+  tile prediction (2869 μs) to 1.5%.
+- Phase 4 latency scales ×1.94–2.25 per poll-period doubling at every
+  block count, and B=16 excl-setter p50 (8.19 μs) sits below one solo
+  wall (10.33 μs), exactly where max-of-16 residuals belongs.
+
+**Two disclosure gaps found, now on the record:**
+1. *The overhead surface's poll-period axis is not interpretable as poll
+   rate.* At B=16/36, P=1 reads LOWER than P=2 (0.91% vs 1.93%) because
+   the PE=1 template variant spills 8 B while PE≥2 variants spill 16 B —
+   codegen, not polling. Only the P=1 columns (both binaries) are
+   apples-to-apples. The cost verdict already uses the worst case across
+   all variants (3.4%), so the verdict stands; the axis caveat must
+   appear in the writeup.
+2. *The check-epoch readings sit at instrument resolution.* Every
+   first-observer p50 is 1–3 quanta of the 1.024 μs globaltimer tick.
+   The honest A-N1 statement is "epoch ≤ ~3 μs at every block count,
+   growth below detectability" — not "the epoch shrinks." The A-N1
+   verdict is unchanged under any reading (no >2× growth is visible at
+   any resolution), but the earlier phrasing implied more precision than
+   the instrument has.
+
+**Judged sound on re-examination:** the latency definition (boundary
+observation = redirectable instant), setter exclusion, B=72 exclusion
+with cause, endpoint-mismatch disclosure (30× matched / 47× device),
+worst-case-across-builds overhead quoting, n≥10k for every quoted p99,
+scope conditions in CLAIM.md matching what was actually measured.
+
+**Blocked on hardware (new box 150.136.146.214 unreachable on port 22 —
+likely still provisioning or a firewall rule):** the sanitization-pass
+rebuild check (`make && make sanitize`), clock lock + under-load
+read-back on the new instance, and a cross-instance reproduction
+spot-check of the 288-block cell — worth doing regardless, since a
+second physical A10 reproducing the surface is a result in itself.
+
+**Next:** when the box answers: rebuild, sanitize, reproduce one latency
++ one overhead cell, remove the README untested-notice. Then Phase 5.
+
+## 2026-08-06 — Sanitization pass verified; cross-instance reproduction
+
+**Doing:** the deferred hardware checks from audit #2, on a fresh
+`gpu_1x_a10` (a different physical card from every prior number). The
+lossy SSH path was bypassed by having the box clone the public GitHub
+repo and run the whole sequence detached under nohup.
+
+**Predicted:** build clean, sanitizer clean (the sanitization pass was
+comments plus one printf and one include). Reproduction within the
+documented ranges: Phase 1 K=128 p50 within a few percent of 17.77 μs;
+288-block latency p50 inside the 54–69 μs build/session range; overhead
+at saturation ~0.
+
+**Got:** all of it. Build clean; **compute-sanitizer 0 errors on all
+three binaries** — the README untested-notice is retired. Reproduction
+on the second card:
+
+| quantity | original | second A10 | delta |
+|---|---|---|---|
+| Phase 1 K=128 tile p50 / p99 | 17.77 / 22.01 μs | 18.05 / 22.10 μs | +1.6% / +0.4% |
+| float64 max rel err (same seed) | 5.307e-06 | 5.307e-06 | bit-identical |
+| 288-block latency p50 / p99 | 68.61 / 90.11 μs | 66.56 / 78.85 μs | inside range |
+| overhead at saturation, P=1 | −0.10% | −0.00% | ~0 both |
+| setter-last fraction at 288 | 0.0% | 0.0% | match |
+
+The tile agreement doubles as the under-load clock evidence: at an
+unlocked boost (1695) the tile would read ~12.6 μs; 18.05 μs is only
+consistent with the 1200 MHz lock holding.
+
+**Surprised by:** nothing in the numbers — the first fully boring run
+this project has had, which after five subverted problems is itself the
+news. Operational note for the log: Lambda reuses IPs (stale host key)
+and a freshly restarted instance passed small SSH bursts while stalling
+bulk transfers for ~15 minutes; clone-from-GitHub + nohup + short-burst
+polling is the resilient pattern for flaky rentals.
+
+**Next:** Phase 5 — the safety question (yield mid-pipeline, float64
+verdict), per the audit's remaining-work list.
+
+## 2026-08-06 — Phase 5: mid-pipeline yield safety, written and predicted
+
+**Doing:** `src/midyield.cu` — a cp.async double-buffered pipelined tile
+(KBP=16, two stages, one commit group per chunk; the sm_80+ staging real
+kernels use), persistent queue as before, dev-set events. At a forced
+yield the CLAIMER interrupts its own pipeline mid-flight — outstanding
+async copies targeting the very smem the urgent tile is about to use —
+and runs the urgent tile in that smem under one of three disciplines:
+`drain` (cp.async.wait_all + barrier first), `naive` (no wait; the
+in-flight group races the urgent staging), `poison` (drain, then corrupt
+one staged float — instrument control). The abandoned bg tile restarts
+from scratch, so C stays correct by construction in every discipline;
+the safety verdict lives entirely in the per-event urgent outputs, all
+10k of which are captured and checked against a float64 reference.
+Non-claimers only observe — one block per event tests the discipline.
+Stage-granularity polling also gives the latency payoff measurement vs
+boundary polling, and overhead runs {off, boundary, stage} complete the
+cost picture.
+
+**Predicted:** `drain`: **0/10,000 corrupt** (rule-of-three upper bound
+3.7e-4) — on sm_86 one wait instruction makes independent mid-pipeline
+yield safe, because nothing outside the CTA can hold a reference into
+its smem; the ExpertPlex hazard needs cluster-level coupling the
+hardware cannot express. `naive`: **20–50% corrupt** — the in-flight
+group targets buf0 half the time and lands within the urgent staging
+window most of that; nonzero is the load-bearing prediction (it
+reproduces the hazard class inside one CTA and proves the instrument
+sees real races, not just planted ones). `poison`: **100%**. C passes
+in all disciplines. Latency at 288 blocks, stage polling: **p50
+20–35 μs** vs ~55–75 μs boundary — mid-tile checks break the
+whole-tile floor; first-observer stays 1–2 quanta. Overhead vs poll-off
+on the pipelined tile: stage ≤ 3.5%, boundary ≤ 1.5%; same codegen
+caveat as Phase 4 (compare within-binary only). Occupancy stays 4/SM
+(16.5 KB smem, pinned launch bounds). Risk noted before running: if
+`naive` shows ZERO corruption at 10k events, the honest reading is that
+the race window is too small at this tile size, not that no discipline
+is needed — widen the window (larger KBP) before concluding anything.
+
+**Got:** two infrastructure subverted problems before any data, then one
+real kernel bug the instrument caught, then a clean 40k-event measurement.
+
+*Subverted problem #7 — a zero exit code over a lossy link is not
+delivery.* The first tar-pipe to the box "succeeded" but the files never
+arrived (discovered when `make` had nothing to do and phase5.sh didn't
+exist). Delivery is now checksum-gated: resend until the remote md5
+matches. The gated loop then failed **eight consecutive times** before one
+transfer landed intact — direct measurement of how often the old blind
+push was silently losing data.
+
+*Subverted problem #8 — the barrier-divergence race.* First poison verify
+FAILED on the **background** C check (20,476 elements, whole tiles,
+plausible magnitudes) — corruption the poison cannot reach. Drain ×10
+then failed 5/10 runs the same way: the original drain PASS had been a
+coin flip (the Cornfield single-sample lesson, again, live). Structure
+dump: whole-tile garbage, not tile-0 data, not allocation-adjacent; more
+corrupt final tiles than events → blocks going *permanently* bad at an
+event. Cause: `checkpoint` compared **live** shared values
+(`s_flag <= s_lastSeen`) while thread 0 updates `s_lastSeen` inside the
+branch — a late warp could read the updated value, skip the branch its
+block entered, and split the block across two `__syncthreads` sites. On
+sm_70+ barriers match by arrival count, not location, so both halves
+release and the block runs permanently phase-shifted, emitting whole-tile
+garbage until the kernel ends. yield.cu always snapshotted between
+barriers (Phases 3–4 unaffected — verified by re-reading that path);
+midyield.cu regressed the pattern. Fix: barrier-protected snapshot.
+Validation: **21/21 clean runs** (P < 1e-6 under the old ~50% rate),
+poison gate still trips, sanitizer clean. This bug is itself a Phase 5
+result: a one-barrier omission in an independent-check protocol produced
+silent, stochastic, whole-tile corruption — the "independent checks are
+hard" claim is real on Ampere, but it lives in **control divergence**,
+not in the data races ExpertPlex's cluster reasoning is about.
+
+The measurement (10k events per discipline, 288 blocks, K=64, KBP=16):
+
+| discipline | corrupt urgent tiles | worst rel err | bg C |
+|---|---|---|---|
+| drain | **0 / 10,000** | 1.4e-06 | PASS |
+| naive | **0 / 10,000** | 1.4e-06 | PASS |
+| poison (control) | **10,000 / 10,000** | 9.9e-01 | PASS |
+
+Latency and cost:
+
+| poll granularity | lat p50 | lat p99 | first obs | overhead vs off |
+|---|---|---|---|---|
+| stage (mid-pipeline) | **18.43 μs** | **23.55 μs** | 2.05 μs | 5.02% |
+| boundary (whole-tile) | 50.18 μs | 58.37 μs | 3.07 μs | 2.04% |
+
+**The Phase 5 statement, with evidence:** per-block independent yield is
+sound on sm_86 — with the drain discipline, 0/10,000 mid-pipeline yields
+corrupted anything (95% CI < 3.7e-4), verified against float64. Stage-
+granularity checks put preemption at **18.4 μs p50 / 23.6 μs p99 at full
+saturation — inside ExpertPlex's 2.2–25.3 μs Hopper tile-boundary band —
+for 5% overhead**, breaking the whole-tile floor that bounded Phases 3–4.
+
+**Surprised by:** (1) `naive` at 0/10,000 — predicted 20–50%. The
+pre-registered risk note anticipated this reading: at this geometry the
+"outstanding" copy group was issued a full stage-compute (~5 μs) before
+the checkpoint, and cp.async copies land in well under a microsecond, so
+by the time the yield fires there is nothing actually in flight —
+`wait_group` bookkeeping outlives the physical hazard. The honest claim
+is scoped: no corruption **at this pipeline geometry**; a window-widening
+variant (larger copies, issue-adjacent checkpoints) is the follow-up
+before any stronger statement. Note the asymmetry: the data-race hazard
+never fired in 10k tries, while the control-divergence hazard fired in
+half of all runs — on Ampere the danger is not where the Hopper reasoning
+points. (2) Stage overhead 5.02% vs predicted ≤3.5% — under the 10%
+falsifier but a real miss; the checkpoint's snapshot barrier (the bug
+fix) is in the hot path at stage granularity, a correctness cost the
+overhead axis now honestly includes. (3) Boundary-poll latency on the
+pipelined tile is 50 μs vs the sync tile's 66-69 μs — pipelined tiles
+have tighter wall distributions (async staging smooths contention).
+
+**Next:** writeup. The arc is complete: baseline (957 μs) → boundary
+yield (~66 μs) → mid-pipeline yield (18.4 μs, Hopper-band) with the
+safety question answered and the hazard relocated from data to control.
