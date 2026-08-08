@@ -18,14 +18,14 @@ not change.
 - The device timer has a resolution of 1.024 microseconds.
 - A second A10 reproduced the primary results. The agreement is within 2%.
 
-## 2. Phase 1 — tile calibration
+## 2. Phase 1: tile calibration
 
 - One tile takes 6.7 to 17.8 microseconds for K = 32, 64, and 128, with one
   block per SM.
 - When four blocks share one SM, tile times increase and spread. The p99
   tile time is then 57.6 microseconds.
 
-## 3. Phase 2 — baseline without preemption
+## 3. Phase 2: baseline without preemption
 
 Condition: all 288 residency slots are full.
 
@@ -35,7 +35,7 @@ Condition: all 288 residency slots are full.
   blocks. They do not remove resident blocks.
 - One free residency slot decreases the wait to 76 microseconds.
 
-## 4. Phase 3 — the yield at tile boundaries
+## 4. Phase 3: the yield at tile boundaries
 
 Mechanism: one flag in device memory. Each block reads the flag at each
 tile boundary. Each block acts on the flag independently.
@@ -49,7 +49,7 @@ tile boundary. Each block acts on the flag independently.
   timeline. With endpoints that match the baseline, the gain is
   approximately 30 times.
 
-## 5. Phase 4 — the scaling surface
+## 5. Phase 4: the scaling surface
 
 Test: resident blocks 16 to 288, poll period 1 to 8 boundaries, 10,000
 events per cell, zero anomalies.
@@ -65,7 +65,7 @@ events per cell, zero anomalies.
   overhead cell (unstable block placement) and the poll-period axis of the
   overhead surface (compiler differences between code variants).
 
-## 6. Phase 5 — safety of the yield in the middle of a pipeline
+## 6. Phase 5: safety of the yield in the middle of a pipeline
 
 Test: a tile with cp.async double-buffered staging. The yield interrupts
 the pipeline while copies are in flight. The urgent tile then uses the
