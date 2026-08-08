@@ -8,6 +8,14 @@ granularity, cost, and safety are possible without them?
 **Answer.** Bounded preemption works on Ampere. Claim N1 holds on both
 pre-registered axes. The full results are in [`RESULTS.md`](RESULTS.md).
 
+## AI use
+
+AI tools (Claude) assisted with code and documentation. The developer
+directed, reviewed, and verified all work. No measured number comes
+from a model: every result comes from the instruments in `src/`, gated
+by pre-registered thresholds ([`CLAIM.md`](CLAIM.md)), float64
+references, sanitizer runs, and reproduction on a second GPU.
+
 **Status.** Phases 1 to 5 complete. The writeup remains. Phase 6 (real
 model) is optional.
 
