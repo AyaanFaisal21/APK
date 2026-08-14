@@ -136,3 +136,72 @@ controls, anomaly counters, and read-back under load.
 ## Next
 
 The writeup. Optionally Phase 6 (port to a real model).
+
+## 2026-08-08. External review response: construct corrections
+
+Two review rounds (recorded in full for future agents outside the repo)
+found no fault in the measurements but two faults in the constructs and
+several in the claims. Corrections, in the reviewer-approved order.
+
+**Post-registered reanalysis of existing Phase 4 events** (no new data;
+`scripts/reanalyze_spread.py`, deterministic, identity-checked on all
+240k events):
+
+- Observation spread (last minus first, across blocks) at poll-every-1:
+  7.2, 9.2, 9.2, 15.4, 31.7, 67.6 us for 16 to 288 blocks.
+- Key fact: 36 to 72 blocks doubles the polling CTAs at constant
+  occupancy and moves the spread 1.00x. Growth appears only when
+  co-residency rises (1.67x, 2.07x, 2.13x at 2, 3, 4 blocks per SM).
+- Spread scales 1.94x to 1.99x per poll-period doubling at 288 blocks.
+- Reading: consistent with residual-checkpoint-work domination. Not yet
+  causal. The visibility microbenchmark decides.
+
+**Code corrections (fault 9, class: unspecified synchronization):**
+
+- The generation flag was a volatile protocol. CUDA C++ volatile
+  carries no inter-thread synchronization guarantee. The flag is now a
+  device-scope atomic, relaxed load and relaxed store, with the
+  contract documented in `tile.cuh`: the atomic communicates only the
+  generation value; nothing is published through it (claims use
+  atomicCAS; setGT is host-read after sync). Relaxed is by design:
+  release was rejected because no acquire pairing exists to serve.
+- The setter's threadfence is removed under the same contract.
+- Applied to yield.cu and midyield.cu. SASS comparison and a full
+  surface rerun are required before the old numbers are cited as
+  current; prediction below.
+
+**New instruments:**
+
+- `--dump-obs`: full per-event, per-block observation matrices to disk
+  (the review assumed these survived; only first/last/spread did).
+- `visibility` mode: notification latency with tile work removed.
+  Floor variant (poll-only) and loaded variant (same 4/SM residency,
+  known FMA cadence, DRAM-resident traffic). Self-terminating kernel,
+  no host in the loop, fixed seed.
+
+**Predictions, filed before the reruns:**
+
+- Atomic vs volatile surface: every latency cell within one timer
+  quantum of the volatile numbers; overhead within 0.3 points. SASS
+  for the hot loop differs by at most the load opcode.
+- Visibility floor: Dmax across blocks stays at or below 3 timer
+  quanta (3.1 us) at every block count 16 to 288. No growth trend.
+- Visibility loaded: Dmax p50 at or below 10 us at 288 blocks; if it
+  grows with block count beyond that, the propagation story is wrong
+  and A-N1 partially revives. This is the falsifiable one.
+- Per-block quantiles at 288 blocks, poll-every-1: D50 near half the
+  co-resident wall p50, D95 near the wall p99, iid order-statistics
+  fit expected to FAIL at SM level (blocks sharing an SM are
+  correlated); a good fit would itself be a finding.
+
+**Claim retirements (effective now, ahead of the paper rewrite):**
+"generalizes below Hopper" narrows to sm_86/A10 evidence; "for every
+Ampere GPU in the world" is retired; "the difficulty lives in control
+flow, not data" is withdrawn until the cp.async window is actually
+opened; "bounded" splits into bounded checkpoint granularity versus
+measured handoff latency; ExpertPlex comparisons become order-of-
+magnitude statements, not equivalence claims.
+
+**Next:** on the A10: SASS diff, sanitize, atomic surface rerun with
+obs dumps, visibility floor and loaded sweeps. Then the reserved-
+capacity Pareto and the cp.async window widening.
