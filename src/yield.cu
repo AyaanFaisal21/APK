@@ -60,7 +60,7 @@
 #include <algorithm>
 #include <cuda_runtime.h>
 
-#include "tile.cuh"
+#include "tile.cuh"  // tile machinery + the relaxed atomic flag contract
 
 #define CUDA_CHECK(call)                                                      \
   do {                                                                        \
@@ -85,7 +85,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
     const float* __restrict__ A, const float* __restrict__ B,
     float* __restrict__ C, float* __restrict__ Cu, int K, int N, int tilesN,
     int totalTiles, unsigned numTasks, unsigned int* nextTask,
-    volatile int* flag, const long long* schedGapsNs, int numEvents,
+    int* flag, const long long* schedGapsNs, int numEvents,
     long long* setGT, long long* obsGT, int* claim, long long* uGT) {
   __shared__ unsigned s_task;
   __shared__ int s_flag;
@@ -111,12 +111,12 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
   while (true) {
     if (threadIdx.x == 0) {
       s_task = atomicAdd(nextTask, 1u);
-      // one volatile L2 read per PE-th tile boundary
+      // one relaxed device-scope atomic load per PE-th tile boundary
       if (POLL) {
         if (PE == 1) {
-          s_flag = *flag;
+          s_flag = flag_load(flag);
         } else if (++s_sinceCheck >= PE) {
-          s_flag = *flag;
+          s_flag = flag_load(flag);
           s_sinceCheck = 0;
         }
       }
@@ -152,9 +152,10 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
       if (s_gBase == 0) s_gBase = globaltimer_ns();
       const long long now = globaltimer_ns();
       if (now >= s_gBase + schedGapsNs[s_nextEv]) {
+        // No fence: setGT is host-read after stream sync only, so the
+        // flag publishes nothing (see flag contract above).
         setGT[s_nextEv] = now;
-        __threadfence();  // setGT visible before the flag flips
-        *flag = ++s_nextEv;
+        flag_store(flag, ++s_nextEv);
       }
     }
 
@@ -168,12 +169,91 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
 
 // Host<->globaltimer calibration probe: records the device wall clock the
 // moment a host-written flag becomes visible.
-__global__ void spin_flag(volatile int* flag, long long* out) {
+__global__ void spin_flag(int* flag, long long* out) {
   if (threadIdx.x == 0) {
-    while (*flag == 0) {
+    while (flag_load(flag) == 0) {
     }
     *out = globaltimer_ns();
   }
+}
+
+// Visibility microbenchmarks (post-review). Question: does the tail of
+// device-scope notification latency grow with the number of polling
+// CTAs, once residual tile work is out of the measurement? Two
+// variants: LOADED=false is the visibility floor (blocks do almost
+// nothing but poll); LOADED=true keeps the same residency shape and
+// adds known-length FMA work plus DRAM-resident traffic, so the memory
+// system is busy but the polling cadence is short and known. The 16.8
+// KB shared pad pins occupancy to the tile kernels' 4 blocks/SM so the
+// residency geometry matches the real measurement. The setter
+// terminates the run itself (stores -1 after the schedule ends), so
+// the run needs no host action and is deterministic given the seed.
+template <bool LOADED>
+__global__ void __launch_bounds__(THREADS, 4) visibility_poll(
+    int* flag, const long long* schedGapsNs, int numEvents,
+    long long* setGT, long long* obsGT, int workIters,
+    const float4* __restrict__ traffic, int trafficLen,
+    float* __restrict__ sink, long long* iterCount) {
+  __shared__ float pad[4200];  // residency parity with the tile kernels
+  __shared__ int s_flag;
+  __shared__ int s_lastSeen;
+  __shared__ int s_nextEv;
+  __shared__ long long s_gBase;
+  if (threadIdx.x == 0) {
+    s_flag = 0;
+    s_lastSeen = 0;
+    s_nextEv = 0;
+    s_gBase = 0;
+  }
+  pad[threadIdx.x % 4200] = (float)threadIdx.x;
+  const bool isSetter = blockIdx.x == 0;
+  float acc = 1.0f;
+  long long it = 0;
+  const size_t tid = (size_t)blockIdx.x * THREADS + threadIdx.x;
+
+  while (true) {
+    for (int i = 0; i < workIters; ++i)  // dependent chain, known length
+      acc = fmaf(acc, 1.0000001f, 1e-7f);
+    if (LOADED) {
+      const float4 v =
+          traffic[(tid + (size_t)it * 131071u) % (unsigned)trafficLen];
+      acc += v.x + v.y + v.z + v.w;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      s_flag = flag_load(flag);
+      if (isSetter) {
+        if (s_gBase == 0) s_gBase = globaltimer_ns();
+        const long long now = globaltimer_ns();
+        if (s_nextEv < numEvents) {
+          if (now >= s_gBase + schedGapsNs[s_nextEv]) {
+            setGT[s_nextEv] = now;
+            flag_store(flag, ++s_nextEv);
+          }
+        } else if (now >= s_gBase + schedGapsNs[numEvents - 1] + 2000000LL) {
+          flag_store(flag, -1);  // self-terminating: no host in the loop
+        }
+      }
+    }
+    __syncthreads();
+    // fault-8 discipline: branch on a barrier-protected snapshot only
+    const int f = s_flag;
+    const int last = s_lastSeen;
+    __syncthreads();
+    if (f < 0) break;
+    if (f > last) {
+      const long long g = globaltimer_ns();
+      if (threadIdx.x == 0) {
+        for (int e = last; e < f; ++e)
+          obsGT[(size_t)e * gridDim.x + blockIdx.x] = g;
+        s_lastSeen = f;
+      }
+      __syncthreads();
+    }
+    ++it;
+  }
+  if (threadIdx.x == 0) iterCount[blockIdx.x] = it;
+  sink[tid] = acc + pad[(threadIdx.x + 1) % 4200];
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +303,7 @@ int main(int argc, char** argv) {
   const int pollEvery = (int)parse_arg(argc, argv, "--poll-every", 1);
   const int warmupEvents = (int)parse_arg(argc, argv, "--warmup-events", 100);
   const char* csvPath = parse_str(argc, argv, "--csv", "");
+  const char* dumpObsPath = parse_str(argc, argv, "--dump-obs", "");
 
   if (K % KB != 0) {
     fprintf(stderr, "--k must be a multiple of %d\n", KB);
@@ -323,6 +404,124 @@ int main(int argc, char** argv) {
   };
 
   const int stopVal = -1;
+
+  // Full per-event, per-block observation matrix, for distribution-level
+  // analysis (post-review): magic 'OBS1', events, blocks, setGT[events],
+  // obs[events*blocks], all little-endian int64.
+  auto dump_obs = [&](const std::vector<long long>& setV,
+                      const std::vector<long long>& obsV, int ev, int blk) {
+    if (!dumpObsPath[0]) return;
+    FILE* f = fopen(dumpObsPath, "wb");
+    if (!f) { fprintf(stderr, "warning: cannot open %s\n", dumpObsPath); return; }
+    const long long hdr[3] = {0x3153424fLL, ev, blk};  // 'OBS1'
+    fwrite(hdr, sizeof(long long), 3, f);
+    fwrite(setV.data(), sizeof(long long), ev, f);
+    fwrite(obsV.data(), sizeof(long long), (size_t)ev * blk, f);
+    fclose(f);
+    printf("obs matrix: %s (%d events x %d blocks)\n", dumpObsPath, ev, blk);
+  };
+
+  // ------------------------------------------------------------ visibility
+  // Notification-latency microbenchmark, decoupled from tile work.
+  if (mode == "visibility") {
+    const int workIters = (int)parse_arg(argc, argv, "--work-iters", 0);
+    const bool loadTraffic = parse_arg(argc, argv, "--loaded", 0) != 0;
+
+    std::mt19937 rng(21);
+    std::uniform_real_distribution<double> gapDist(gapMinUs * 1000.0,
+                                                   gapMaxUs * 1000.0);
+    std::vector<long long> gaps(evAlloc);
+    long long acc = 0;
+    for (int e = 0; e < events; ++e) gaps[e] = (acc += (long long)gapDist(rng));
+    CUDA_CHECK(cudaMemcpy(dSched, gaps.data(),
+                          (size_t)evAlloc * sizeof(long long),
+                          cudaMemcpyHostToDevice));
+    zero_all();
+
+    const int trafficLen = 4 * 1024 * 1024;  // float4 entries: 64 MB, DRAM
+    float4* dTraffic;
+    float* dSink;
+    long long* dIter;
+    CUDA_CHECK(cudaMalloc(&dTraffic, (size_t)trafficLen * sizeof(float4)));
+    CUDA_CHECK(cudaMalloc(&dSink, (size_t)blocks * THREADS * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dIter, (size_t)blocks * sizeof(long long)));
+    {
+      std::vector<float4> hT(trafficLen);
+      for (int i = 0; i < trafficLen; ++i)  // deterministic fill
+        hT[i] = make_float4((float)(i % 251), (float)(i % 241),
+                            (float)(i % 239), (float)(i % 233));
+      CUDA_CHECK(cudaMemcpy(dTraffic, hT.data(),
+                            (size_t)trafficLen * sizeof(float4),
+                            cudaMemcpyHostToDevice));
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const long long t0 = now_ns();
+    if (loadTraffic)
+      visibility_poll<true><<<blocks, THREADS, 0, kStream>>>(
+          dFlag, dSched, events, dSetGT, dObsGT, workIters, dTraffic,
+          trafficLen, dSink, dIter);
+    else
+      visibility_poll<false><<<blocks, THREADS, 0, kStream>>>(
+          dFlag, dSched, events, dSetGT, dObsGT, workIters, dTraffic,
+          trafficLen, dSink, dIter);
+    CUDA_CHECK(cudaStreamSynchronize(kStream));  // kernel self-terminates
+    const double wallUs = (now_ns() - t0) / 1e3;
+    CUDA_CHECK(cudaGetLastError());
+
+    std::vector<long long> hSetGT(evAlloc), hObs((size_t)evAlloc * blocks),
+        hIter(blocks);
+    CUDA_CHECK(cudaMemcpy(hSetGT.data(), dSetGT, evAlloc * sizeof(long long),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hObs.data(), dObsGT,
+                          (size_t)evAlloc * blocks * sizeof(long long),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hIter.data(), dIter, blocks * sizeof(long long),
+                          cudaMemcpyDeviceToHost));
+
+    std::vector<double> iters(hIter.begin(), hIter.end());
+    const double cadenceUs = wallUs / percentile(iters, 0.5);
+    printf("cadence: %.3f us/iteration (median block, %d work-iters, "
+           "loaded=%d)\n", cadenceUs, workIters, loadTraffic ? 1 : 0);
+
+    // Per-event quantiles of (obs - set) ACROSS BLOCKS, then aggregate
+    // over events: the notification-tail construct the review asked for.
+    std::vector<double> dmin, d50, d95, dmax;
+    int unset = 0, anomalies = 0;
+    for (int e = 0; e < events; ++e) {
+      if (hSetGT[e] == 0) { ++unset; continue; }
+      std::vector<double> d;
+      d.reserve(blocks);
+      bool complete = true;
+      for (int b = 0; b < blocks; ++b) {
+        const long long o = hObs[(size_t)e * blocks + b];
+        if (o == 0) { complete = false; break; }
+        d.push_back((o - hSetGT[e]) / 1e3);
+      }
+      if (!complete) { ++anomalies; continue; }
+      if (e < warmupEvents) continue;
+      std::sort(d.begin(), d.end());
+      dmin.push_back(d.front());
+      d50.push_back(d[std::min((size_t)(0.5 * d.size()), d.size() - 1)]);
+      d95.push_back(d[std::min((size_t)(0.95 * d.size()), d.size() - 1)]);
+      dmax.push_back(d.back());
+    }
+    printf("\n--- visibility (%s): %zu events (%d unset, %d anomalies), "
+           "%d blocks ---\n", loadTraffic ? "loaded" : "floor", dmax.size(),
+           unset, anomalies, blocks);
+    if (!dmax.empty()) {
+      printf("across-block delay (us): Dmin p50 %.2f | D50 p50 %.2f | "
+             "D95 p50 %.2f | Dmax p50 %.2f | Dmax p99 %.2f\n",
+             percentile(dmin, 0.5), percentile(d50, 0.5),
+             percentile(d95, 0.5), percentile(dmax, 0.5),
+             percentile(dmax, 0.99));
+    }
+    dump_obs(hSetGT, hObs, events, blocks);
+    CUDA_CHECK(cudaFree(dTraffic));
+    CUDA_CHECK(cudaFree(dSink));
+    CUDA_CHECK(cudaFree(dIter));
+    return 0;
+  }
 
   // ------------------------------------------------------------ overhead
   if (mode == "overhead") {
@@ -530,6 +729,7 @@ int main(int argc, char** argv) {
                         cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(hClaim.data(), dClaim, evAlloc * sizeof(int),
                         cudaMemcpyDeviceToHost));
+  dump_obs(hSetGT, hObs, events, blocks);
 
   std::vector<double> lat, latX0, spread, e2e, firstDelay, b0Delay;
   int anomalies = 0, unset = 0, lastIsSetter = 0;

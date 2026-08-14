@@ -10,6 +10,24 @@
 // sweep run against a modified tile.
 #pragma once
 #include <cuda_runtime.h>
+#include <cuda/atomic>
+
+// Flag contract (post-review, 2026-08-08): the generation flag is a
+// device-scope atomic that communicates ONLY the generation value.
+// Nothing is published through it: claims go through atomicCAS, and
+// setGT is read by the host only after stream synchronization. Loads
+// and stores are therefore memory_order_relaxed by design, not by
+// omission. CUDA C++ volatile carries no inter-thread synchronization
+// guarantee, so the previous volatile protocol was unspecified even
+// though it behaved identically on sm_86.
+using flag_ref = cuda::atomic_ref<int, cuda::thread_scope_device>;
+
+__device__ __forceinline__ int flag_load(int* f) {
+  return flag_ref(*f).load(cuda::memory_order_relaxed);
+}
+__device__ __forceinline__ void flag_store(int* f, int v) {
+  flag_ref(*f).store(v, cuda::memory_order_relaxed);
+}
 
 constexpr int TM = 64;
 constexpr int TN = 64;

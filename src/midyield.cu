@@ -91,7 +91,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
     const float* __restrict__ A, const float* __restrict__ B,
     float* __restrict__ C, float* __restrict__ CuAll, int K, int N,
     int tilesN, int totalTiles, unsigned numTasks, unsigned int* nextTask,
-    volatile int* flag, const long long* schedGapsNs, int numEvents,
+    int* flag, const long long* schedGapsNs, int numEvents,
     long long* setGT, long long* obsGT, int* claim, long long* uGT) {
   __shared__ float As[2][TM][KBP];
   __shared__ float Bs[2][KBP][TN];
@@ -206,7 +206,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
   while (true) {
     if (threadIdx.x == 0) {
       s_task = atomicAdd(nextTask, 1u);
-      if (POLLMODE != POLL_OFF) s_flag = *flag;
+      if (POLLMODE != POLL_OFF) s_flag = flag_load(flag);
     }
     __syncthreads();
     const unsigned task = s_task;
@@ -237,14 +237,15 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
           if (s_gBase == 0) s_gBase = globaltimer_ns();
           const long long now = globaltimer_ns();
           if (now >= s_gBase + schedGapsNs[s_nextEv]) {
+            // No fence: the flag publishes only the generation value
+            // (contract in tile.cuh); setGT is host-read after sync.
             setGT[s_nextEv] = now;
-            __threadfence();
-            *flag = ++s_nextEv;
+            flag_store(flag, ++s_nextEv);
           }
         }
 
         if (POLLMODE == POLL_STAGE) {
-          if (threadIdx.x == 0) s_flag = *flag;
+          if (threadIdx.x == 0) s_flag = flag_load(flag);
           __syncthreads();
           // Mid-pipeline yield point: for c+1 < nChunks a copy group is
           // still outstanding, targeting buffer (c+1)&1 — buffer 0 on
