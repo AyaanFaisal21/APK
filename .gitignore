@@ -6,3 +6,7 @@ results/raw/
 __pycache__/
 .venv/
 agent-notes/
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.pdf
