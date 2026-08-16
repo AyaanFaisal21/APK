@@ -62,6 +62,14 @@
 
 #include "tile.cuh"  // tile machinery + the relaxed atomic flag contract
 
+// Oracle counters live in device globals, not kernel parameters: extra
+// parameters change every instantiation's signature and shift codegen
+// (the SASS guard caught exactly that, 4400 -> 4512). Globals referenced
+// only under if (ORACLE) are dead-code-eliminated from measurement
+// variants, whose SASS must stay byte-identical.
+__device__ int* g_execCount;
+__device__ int* g_uExecCount;
+
 #define CUDA_CHECK(call)                                                      \
   do {                                                                        \
     cudaError_t err_ = (call);                                                \
@@ -91,8 +99,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
     int totalTiles, unsigned numTasks, unsigned int* nextTask,
     int* flag, const long long* schedGapsNs, int numEvents,
     long long* setGT, long long* obsGT, int* claim, long long* uGT,
-    int urgentTiles, int* uqNext, unsigned long long* uEndMax,
-    int* execCount, int* uExecCount) {
+    int urgentTiles, int* uqNext, unsigned long long* uEndMax) {
   __shared__ unsigned s_task;
   __shared__ int s_flag;
   __shared__ int s_claimed;
@@ -166,7 +173,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
         }
         tile_gemm(A, B, Cu, K, N, 0, 0, TN, 0, 0);
         __syncthreads();
-        if (ORACLE && threadIdx.x == 0) atomicAdd(&uExecCount[f - 1], 1);
+        if (ORACLE && threadIdx.x == 0) atomicAdd(&g_uExecCount[f - 1], 1);
         popped = true;
       }
       if (popped && threadIdx.x == 0) {
@@ -192,7 +199,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
     const int c = (tile % tilesN) * TN;
     tile_gemm(A, B, C, K, N, r, c, N, r, c);
     __syncthreads();
-    if (ORACLE && threadIdx.x == 0) atomicAdd(&execCount[task], 1);
+    if (ORACLE && threadIdx.x == 0) atomicAdd(&g_execCount[task], 1);
   }
 }
 
@@ -410,29 +417,29 @@ int main(int argc, char** argv) {
     if (!poll) {
       persistent_yield<false, 1><<<blocks, THREADS, 0, kStream>>>(
           dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-          nullptr, 0, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax, nullptr, nullptr);
+          nullptr, 0, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
       return;
     }
     switch (pollEvery) {
       case 1:
         persistent_yield<true, 1><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax, nullptr, nullptr);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
         break;
       case 2:
         persistent_yield<true, 2><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax, nullptr, nullptr);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
         break;
       case 4:
         persistent_yield<true, 4><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax, nullptr, nullptr);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
         break;
       case 8:
         persistent_yield<true, 8><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax, nullptr, nullptr);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
         break;
       default:
         fprintf(stderr, "--poll-every must be 1, 2, 4, or 8\n");
@@ -598,11 +605,13 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemset(dExecCount, 0, (size_t)oTasks * sizeof(int)));
     CUDA_CHECK(cudaMemset(dUExec, 0, (size_t)evAlloc * sizeof(int)));
     zero_all();
+    CUDA_CHECK(cudaMemcpyToSymbol(g_execCount, &dExecCount, sizeof(int*)));
+    CUDA_CHECK(cudaMemcpyToSymbol(g_uExecCount, &dUExec, sizeof(int*)));
     CUDA_CHECK(cudaDeviceSynchronize());
     persistent_yield<true, 1, true><<<blocks, THREADS, 0, kStream>>>(
         dA, dB, dC, dCu, K, N, tilesN, totalTiles, oTasks, dNext, dFlag,
         dSched, events, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext,
-        dUEndMax, dExecCount, dUExec);
+        dUEndMax);
     CUDA_CHECK(cudaStreamSynchronize(kStream));
     CUDA_CHECK(cudaGetLastError());
 

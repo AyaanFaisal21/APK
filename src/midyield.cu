@@ -51,6 +51,9 @@
 
 #include "tile.cuh"
 
+__device__ int* g_execCount;   // see yield.cu: parameters shift codegen
+__device__ int* g_uExecCount;  // globals under if(ORACLE) are eliminated
+
 #define CUDA_CHECK(call)                                                      \
   do {                                                                        \
     cudaError_t err_ = (call);                                                \
@@ -93,7 +96,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
     int tilesN, int totalTiles, unsigned numTasks, unsigned int* nextTask,
     int* flag, const long long* schedGapsNs, int numEvents,
     long long* setGT, long long* obsGT, int* claim, int* claimSite,
-    long long* uGT, int* execCount, int* uExecCount) {
+    long long* uGT) {
   __shared__ float As[2][TM][KBP];
   __shared__ float Bs[2][KBP][TN];
   __shared__ unsigned s_task;
@@ -167,7 +170,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
     __syncthreads();
     if (threadIdx.x == 0) {
       uGT[2 * (size_t)event + 1] = globaltimer_ns();
-      if (ORACLE) atomicAdd(&uExecCount[event], 1);
+      if (ORACLE) atomicAdd(&g_uExecCount[event], 1);
     }
   };
 
@@ -310,7 +313,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
             C[r * N + (colBase + tx * 4 + j)] = acc[i][j];
         }
         __syncthreads();
-        if (ORACLE && threadIdx.x == 0) atomicAdd(&execCount[task], 1);
+        if (ORACLE && threadIdx.x == 0) atomicAdd(&g_execCount[task], 1);
       }
     }
   }
@@ -446,7 +449,7 @@ int main(int argc, char** argv) {
       kern<<<blocks, THREADS, 0, kStream>>>(dA, dB, dC, dCuAll, K, N, tilesN,
                                             totalTiles, nTasks, dNext, dFlag,
                                             sched, nEvents, dSetGT, dObsGT,
-                                            dClaim, dClaimSite, dUGT, nullptr, nullptr);
+                                            dClaim, dClaimSite, dUGT);
     };
     if (pm == POLL_OFF) args(persistent_midyield<POLL_OFF, DISC_DRAIN>);
     else if (pm == POLL_BOUNDARY)
@@ -642,19 +645,21 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMalloc(&dUExec, (size_t)evAlloc * sizeof(int)));
     CUDA_CHECK(cudaMemset(dExecCount, 0, (size_t)tasks * sizeof(int)));
     CUDA_CHECK(cudaMemset(dUExec, 0, (size_t)evAlloc * sizeof(int)));
+    CUDA_CHECK(cudaMemcpyToSymbol(g_execCount, &dExecCount, sizeof(int*)));
+    CUDA_CHECK(cudaMemcpyToSymbol(g_uExecCount, &dUExec, sizeof(int*)));
     CUDA_CHECK(cudaDeviceSynchronize());
     if (pollI == POLL_STAGE && discI == DISC_DRAIN)
       persistent_midyield<POLL_STAGE, DISC_DRAIN, true>
           <<<blocks, THREADS, 0, kStream>>>(
               dA, dB, dC, dCuAll, K, N, tilesN, totalTiles, tasks, dNext,
               dFlag, dSched, events, dSetGT, dObsGT, dClaim, dClaimSite,
-              dUGT, dExecCount, dUExec);
+              dUGT);
     else if (pollI == POLL_ISSUE && discI == DISC_NAIVE)
       persistent_midyield<POLL_ISSUE, DISC_NAIVE, true>
           <<<blocks, THREADS, 0, kStream>>>(
               dA, dB, dC, dCuAll, K, N, tilesN, totalTiles, tasks, dNext,
               dFlag, dSched, events, dSetGT, dObsGT, dClaim, dClaimSite,
-              dUGT, dExecCount, dUExec);
+              dUGT);
     else {
       fprintf(stderr, "--oracle supports stage/drain and issue/naive\n");
       return 1;
