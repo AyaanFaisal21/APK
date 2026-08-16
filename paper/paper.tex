@@ -435,13 +435,17 @@ with no cross-CTA state it is already a non-factor.
 \textbf{Loaded: congestion, and it is architectural.} With the memory
 system saturated, the across-block max grows with occupancy: on the
 A10, 7--8\us{} through 144 blocks, 21.5\us{} at 216, 97.3\us{} at 288;
-on the A100, 6.1\us{} at 108 blocks but 158.7\us{} at 432. We
-registered the prediction that $3\times$ bandwidth and a 40\,MB L2
-would cap the A100 tail at 25\us; it was falsified---the tail
-\emph{grew}. Congestion-induced observation tails are contention
-queueing physics, not bandwidth famine, and no memory-headroom
-purchase removes them. The two variants bracket the real workload
-(64.5\us{} at A10 saturation) from below and above.
+on the A100, 6.1\us{} at 108 blocks, 158.7\us{} at 324, and
+3.78\,ms at 432---computed from the released observation matrices,
+which is how a log-scrape misattribution of this cell was caught
+(fault~16 in the run log): under full-occupancy DRAM streaming a
+straggling block can stall for milliseconds. We registered the
+prediction that $3\times$ bandwidth and a 40\,MB L2 would cap the A100
+tail at 25\us; it was falsified by two orders of magnitude.
+Congestion-induced observation tails are contention queueing physics,
+not bandwidth famine, and no memory-headroom purchase removes them.
+The two variants bracket the real workload (64.5\us{} at A10
+saturation) from below and far above.
 
 \subsection{Mid-pipeline handoff and the safety contract}
 \label{sec:safety}
