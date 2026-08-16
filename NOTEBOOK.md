@@ -205,3 +205,41 @@ magnitude statements, not equivalence claims.
 **Next:** on the A10: SASS diff, sanitize, atomic surface rerun with
 obs dumps, visibility floor and loaded sweeps. Then the reserved-
 capacity Pareto and the cp.async window widening.
+
+## 2026-08-14. Scrutiny audit received; window-forcing built; new box
+
+External verification audit (third scrutiny pass; full report linked in
+the briefing) verified every external quote and number, confirmed no
+scoop, and found 9 blocking draft defects. Measurement-relevant items
+land here; paper-prose items queue for the rewrite.
+
+- Fault 10 (accounting): the mid-pipeline safety claim counted all
+  10,000 stage yields as collision geometry; the pipeline gives ~1/4
+  (buffer-0 outstanding only at site c=1 of 0..3), and sites were
+  unlogged. Fix: per-event yield-site logging (claimSite, one int).
+- Fault 11 (explanation): the naive-zero mechanism story ("issued a full
+  stage-compute ~5 us before the yield") contradicts the code; the
+  outstanding group is issued in the same iteration as the checkpoint.
+  Explanation withdrawn; superseded by the window-forcing experiment.
+- Barrier comment corrected (audit B9): arrival-count completion is not
+  an sm_70 change; divergent __syncthreads is documented UB; the
+  observed silent phase-shift is a permitted UB outcome, not documented
+  semantics.
+- CLAIM.md amendments A1-A4 registered (dated) before their data:
+  notification tail, window-forced safety, Pareto, A100 anchor.
+- New poll mode `issue`: checkpoint before any cp.async wait. At sites
+  c = 0, 1, 2 a buffer-0 group is outstanding at the yield by
+  construction; site 3 is buffer-1 only.
+
+Predictions, filed before the window-forcing runs:
+
+- issue + naive: corruption strictly > 0, concentrated at sites 0-2;
+  site 3 near zero. Overall 15-60% of claimed events at colliding
+  sites. This is the load-bearing prediction: if it stays zero, the
+  drain-causality claim cannot be made at this tile geometry at all.
+- issue + drain: 0 corrupt. issue + poison: 100%.
+- Claim-site distribution approximately uniform over c = 0..3 in both
+  stage and issue modes.
+- stage + naive rerun with site logging: still 0 corrupt; ~2,500
+  events at the one colliding site (c=1), reported precisely per B7.
+- Surface and visibility predictions filed 2026-08-08 stand unchanged.

@@ -43,4 +43,37 @@ Fix these now. Moving them after seeing data invalidates the result.
 
 ## Amendments
 
-*(none yet — date and justify each)*
+**2026-08-14 — post-registration constructs, registered before their data
+is collected.** Reason: two external review rounds plus a verification
+audit found no fault in the measurements but found that two registered
+constructs did not measure what their names claimed (first-observer delay
+as "check epoch"; the volatile flag protocol), and that the mid-pipeline
+safety experiment never opened the race window it claimed to test. The
+original thresholds above are unmoved and their registered readings will
+be co-reported. The corrective constructs are:
+
+- **A1 — Notification tail.** Per-block observation-delay distributions
+  (min/median/p95/max across resident blocks, per event) replace
+  first-observer delay as the propagation reading. A visibility
+  microbenchmark (poll-only floor variant; loaded variant with matched
+  residency, known cadence, DRAM traffic) isolates notification from
+  residual tile work. Notification is a non-factor if the across-block
+  max delay (floor variant) stays within 3 timer quanta at every block
+  count 16–288 with no monotonic growth; it is a factor worth its own
+  section if the loaded-variant max grows with block count beyond 10 us
+  at 288.
+- **A2 — Window-forced safety.** Issue-adjacent checkpoints (poll before
+  any cp.async wait) with per-event yield-site logging. The
+  drain-causality claim requires the naive discipline to corrupt at
+  buffer-0-colliding sites under this geometry AND the drain discipline
+  to stay at zero corruption under the identical geometry. Statistic for
+  zero-failure cells: one-sided 95% rule-of-three bound (3.0e-4 at
+  0/10,000).
+- **A3 — Reserved-capacity Pareto.** Urgent p99 versus background
+  throughput across reserved residency slots and urgent work sizes;
+  cooperative handoff must be compared against spatial headroom before
+  any "preferable" language is used. Registered now; not yet run.
+- **A4 — A100 anchor (promoted from optional).** Prediction: the
+  mechanism decomposition (epoch flat, tile term dominant) holds on
+  sm_80; the floor-variant max delay stays within 2 quanta; constants
+  are expected to shift and will not be blended with GA102 numbers.

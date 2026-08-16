@@ -83,7 +83,7 @@ __device__ __forceinline__ void cp_wait_one_outstanding() {
   asm volatile("cp.async.wait_group 1;\n" ::);
 }
 
-enum PollMode { POLL_OFF = 0, POLL_BOUNDARY = 1, POLL_STAGE = 2 };
+enum PollMode { POLL_OFF = 0, POLL_BOUNDARY = 1, POLL_STAGE = 2, POLL_ISSUE = 3 };
 enum Discipline { DISC_DRAIN = 0, DISC_NAIVE = 1, DISC_POISON = 2 };
 
 template <int POLLMODE, int DISC>
@@ -92,7 +92,8 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
     float* __restrict__ C, float* __restrict__ CuAll, int K, int N,
     int tilesN, int totalTiles, unsigned numTasks, unsigned int* nextTask,
     int* flag, const long long* schedGapsNs, int numEvents,
-    long long* setGT, long long* obsGT, int* claim, long long* uGT) {
+    long long* setGT, long long* obsGT, int* claim, int* claimSite,
+    long long* uGT) {
   __shared__ float As[2][TM][KBP];
   __shared__ float Bs[2][KBP][TN];
   __shared__ unsigned s_task;
@@ -175,12 +176,19 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
   // the Phase 5 corruption bug (NOTEBOOK 2026-08-06). Thread 0 updates
   // s_lastSeen inside the branch, so a late-drifting warp reading the live
   // value could skip the branch the rest of the block entered — splitting
-  // the block across two __syncthreads sites. On sm_70+ barriers match by
-  // arrival count, not location, so both halves release and the block
-  // continues permanently phase-shifted, emitting whole-tile garbage.
+  // the block across two __syncthreads sites. Hardware barriers complete
+  // on arrival count, not program location; NVIDIA documents divergent
+  // __syncthreads as undefined behavior, and on this part the observed
+  // outcome was both halves releasing and the block running permanently
+  // phase-shifted — silent corruption rather than a hang. (Audit B9: the
+  // earlier sm_70+ attribution here was wrong and is withdrawn.)
   // yield.cu always snapshotted (Phases 3-4 unaffected); this file
   // regressed the pattern and paid for it.
-  auto checkpoint = [&](bool midPipeline) -> bool {
+  //
+  // site: which stage checkpoint the claim landed on (-1 = tile boundary,
+  // pipeline empty). Logged per event (audit B7): without it the
+  // collision-geometry split across sites is unknowable after the fact.
+  auto checkpoint = [&](int site, bool midPipeline) -> bool {
     const int f = s_flag;
     const int last = s_lastSeen;
     __syncthreads();  // all threads hold the snapshot before tid0 may write
@@ -190,6 +198,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
       for (int e = last; e < f; ++e)
         obsGT[(size_t)e * gridDim.x + blockIdx.x] = g;
       s_claimed = (atomicCAS(&claim[f - 1], 0, (int)blockIdx.x + 1) == 0);
+      if (s_claimed) claimSite[f - 1] = site;
       s_lastSeen = f;
     }
     __syncthreads();
@@ -217,7 +226,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
     const int rowBase = (tile / tilesN) * TM;
     const int colBase = (tile % tilesN) * TN;
 
-    if (POLLMODE == POLL_BOUNDARY) checkpoint(false);  // pipeline is empty
+    if (POLLMODE == POLL_BOUNDARY) checkpoint(-1, false);  // pipeline empty
 
     bool redo = true;
     while (redo) {
@@ -227,6 +236,23 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
       for (int c = 0; c < nChunks; ++c) {
         if (c + 1 < nChunks)
           issue_chunk((c + 1) & 1, (c + 1) * KBP, rowBase, colBase);
+
+        if (POLLMODE == POLL_ISSUE) {
+          if (threadIdx.x == 0) s_flag = flag_load(flag);
+          __syncthreads();
+          // Window-forcing yield point (audit B7/B8): BEFORE any wait.
+          // The group for chunk c+1 was issued microseconds ago in this
+          // iteration and the group for chunk c may also still be in
+          // flight — under the naive discipline the urgent tile stages
+          // into buffer 0 with a buffer-0 group outstanding at sites
+          // c = 0, 1, 2 (site 3's only outstanding group targets
+          // buffer 1). Maximal-window geometry by construction.
+          if (checkpoint(c, true)) {
+            redo = true;
+            break;
+          }
+        }
+
         if (c + 1 < nChunks)
           cp_wait_one_outstanding();  // chunk c landed, c+1 in flight
         else
@@ -248,9 +274,10 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
           if (threadIdx.x == 0) s_flag = flag_load(flag);
           __syncthreads();
           // Mid-pipeline yield point: for c+1 < nChunks a copy group is
-          // still outstanding, targeting buffer (c+1)&1 — buffer 0 on
-          // every second chunk, i.e. exactly where urgent_tile stages.
-          if (checkpoint(c + 1 < nChunks)) {
+          // still outstanding, targeting buffer (c+1)&1 — buffer 0 only
+          // at site c=1 of sites 0..3 (audit B7: the per-site split must
+          // be logged, not assumed).
+          if (checkpoint(c, c + 1 < nChunks)) {
             redo = true;
             break;
           }
@@ -335,7 +362,8 @@ int main(int argc, char** argv) {
                     : disc == "naive"  ? DISC_NAIVE
                     : disc == "poison" ? DISC_POISON
                                        : -1;
-  const int pollI = poll == "off"        ? POLL_OFF
+  const int pollI = poll == "issue"      ? POLL_ISSUE
+                    : poll == "off"        ? POLL_OFF
                     : poll == "boundary" ? POLL_BOUNDARY
                     : poll == "stage"    ? POLL_STAGE
                                          : -1;
@@ -374,7 +402,7 @@ int main(int argc, char** argv) {
   const int evAlloc = std::max(events, 1);
   float *dA, *dB, *dC, *dCuAll;
   unsigned int* dNext;
-  int *dFlag, *dClaim;
+  int *dFlag, *dClaim, *dClaimSite;
   long long *dSched, *dSetGT, *dObsGT, *dUGT;
   CUDA_CHECK(cudaMalloc(&dA, hA.size() * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&dB, hB.size() * sizeof(float)));
@@ -387,6 +415,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMalloc(&dObsGT, (size_t)evAlloc * blocks * sizeof(long long)));
   CUDA_CHECK(cudaMalloc(&dUGT, (size_t)evAlloc * 2 * sizeof(long long)));
   CUDA_CHECK(cudaMalloc(&dClaim, (size_t)evAlloc * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&dClaimSite, (size_t)evAlloc * sizeof(int)));
   CUDA_CHECK(cudaMemcpy(dA, hA.data(), hA.size() * sizeof(float),
                         cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(dB, hB.data(), hB.size() * sizeof(float),
@@ -403,6 +432,7 @@ int main(int argc, char** argv) {
         cudaMemset(dObsGT, 0, (size_t)evAlloc * blocks * sizeof(long long)));
     CUDA_CHECK(cudaMemset(dUGT, 0, (size_t)evAlloc * 2 * sizeof(long long)));
     CUDA_CHECK(cudaMemset(dClaim, 0, (size_t)evAlloc * sizeof(int)));
+    CUDA_CHECK(cudaMemset(dClaimSite, 0xFF, (size_t)evAlloc * sizeof(int)));
   };
 
   auto launch = [&](int pm, int dc, unsigned nTasks, const long long* sched,
@@ -411,17 +441,23 @@ int main(int argc, char** argv) {
       kern<<<blocks, THREADS, 0, kStream>>>(dA, dB, dC, dCuAll, K, N, tilesN,
                                             totalTiles, nTasks, dNext, dFlag,
                                             sched, nEvents, dSetGT, dObsGT,
-                                            dClaim, dUGT);
+                                            dClaim, dClaimSite, dUGT);
     };
     if (pm == POLL_OFF) args(persistent_midyield<POLL_OFF, DISC_DRAIN>);
     else if (pm == POLL_BOUNDARY)
       args(persistent_midyield<POLL_BOUNDARY, DISC_DRAIN>);
-    else if (dc == DISC_DRAIN)
+    else if (pm == POLL_STAGE && dc == DISC_DRAIN)
       args(persistent_midyield<POLL_STAGE, DISC_DRAIN>);
-    else if (dc == DISC_NAIVE)
+    else if (pm == POLL_STAGE && dc == DISC_NAIVE)
       args(persistent_midyield<POLL_STAGE, DISC_NAIVE>);
-    else
+    else if (pm == POLL_STAGE)
       args(persistent_midyield<POLL_STAGE, DISC_POISON>);
+    else if (dc == DISC_DRAIN)
+      args(persistent_midyield<POLL_ISSUE, DISC_DRAIN>);
+    else if (dc == DISC_NAIVE)
+      args(persistent_midyield<POLL_ISSUE, DISC_NAIVE>);
+    else
+      args(persistent_midyield<POLL_ISSUE, DISC_POISON>);
   };
 
   // float64 reference for the urgent tile — tile (0,0), computed once.
@@ -598,7 +634,7 @@ int main(int argc, char** argv) {
 
   std::vector<long long> hSetGT(evAlloc), hUGT((size_t)evAlloc * 2);
   std::vector<long long> hObs((size_t)evAlloc * blocks);
-  std::vector<int> hClaim(evAlloc);
+  std::vector<int> hClaim(evAlloc), hSite(evAlloc);
   std::vector<float> hCu((size_t)evAlloc * TM * TN);
   CUDA_CHECK(cudaMemcpy(hSetGT.data(), dSetGT, evAlloc * sizeof(long long),
                         cudaMemcpyDeviceToHost));
@@ -609,6 +645,8 @@ int main(int argc, char** argv) {
                         (size_t)evAlloc * 2 * sizeof(long long),
                         cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(hClaim.data(), dClaim, evAlloc * sizeof(int),
+                        cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(hSite.data(), dClaimSite, evAlloc * sizeof(int),
                         cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(hCu.data(), dCuAll, hCu.size() * sizeof(float),
                         cudaMemcpyDeviceToHost));
@@ -621,7 +659,7 @@ int main(int argc, char** argv) {
   FILE* csv = csvPath[0] ? fopen(csvPath, "w") : nullptr;
   if (csv)
     fprintf(csv, "event,lat_us,lat_excl_setter_us,first_us,claimer,e2e_us,"
-                 "cu_max_rel,corrupt,complete\n");
+                 "cu_max_rel,corrupt,complete,site\n");
   for (int e = 0; e < events; ++e) {
     const long long setNs = hSetGT[e];
     if (setNs == 0) { ++unset; continue; }
@@ -657,9 +695,9 @@ int main(int argc, char** argv) {
       if (e2eUs >= 0) e2e.push_back(e2eUs);
     }
     if (csv)
-      fprintf(csv, "%d,%.2f,%.2f,%.2f,%d,%.2f,%.3e,%d,%d\n", e, latUs,
+      fprintf(csv, "%d,%.2f,%.2f,%.2f,%d,%.2f,%.3e,%d,%d,%d\n", e, latUs,
               (hiX0 - setNs) / 1e3, (lo - setNs) / 1e3, hClaim[e] - 1, e2eUs,
-              mr, bad > 0 ? 1 : 0, complete ? 1 : 0);
+              mr, bad > 0 ? 1 : 0, complete ? 1 : 0, hSite[e]);
   }
   if (csv) fclose(csv);
 

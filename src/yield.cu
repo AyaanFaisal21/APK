@@ -805,7 +805,7 @@ int main(int argc, char** argv) {
            percentile(spread, 0.5), percentile(spread, 0.99));
     if (!e2e.empty())
       printf("urgent e2e set->done (us): p50 %.2f | p99 %.2f  [Phase 2 sat "
-             "baseline: 957 p50 / 1436 p99]\n",
+             "baseline: 957 p50 / 1476 p99]\n",
              percentile(e2e, 0.5), percentile(e2e, 0.99));
   }
   if (csvPath[0]) printf("raw: %s\n", csvPath);
