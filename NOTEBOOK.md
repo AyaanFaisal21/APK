@@ -427,3 +427,50 @@ Budget: ~2 hours on gpu_1x_a100_sxm4. Order: lock hunt with under-load
 read-back FIRST (observation 14), quantum measurement, occupancy check,
 then calibration, surface subset (4 block counts), visibility, safety
 trio, Pareto spot, slack.
+
+## 2026-08-15. A100 anchor (A4): results
+
+Fault 15 first: the initial batch compiled for sm_86 and every kernel
+launch failed with no-kernel-image, yet all completion markers printed
+green (the runner only gated the build). The clock hunt "verified"
+1410 MHz against an idle GPU. Caught by inspecting gate output rather
+than trusting markers; runner now hard-aborts on any gate failure.
+Rule: a completion marker is not a gate.
+
+Valid run (ARCH=sm_80): all gates enforced and clean. 1410 MHz held
+under real load (400 W part). Occupancy 4 blocks/SM, saturation 432,
+as predicted. Timer quantum: 1.024 us on GA100 too.
+
+| quantity | A100 (sm_80, 1410 MHz) | A10 (sm_86, 1200 MHz) |
+|---|---|---|
+| solo tile K=64 p50 | 7.8 us | 10.3 us |
+| boundary yield p50/p99 at sat | 55.3 / 64.5 us (432 blk) | 64.5 / 86.0 us (288 blk) |
+| stage yield p50/p99 at sat | 16.4 / 21.5 us | 17.4 / 22.5 us |
+| first observer p50 | 1.02 us flat | 1.02 us flat |
+| floor visibility Dmax | 1.02 us flat to 432 | 1.02 us flat to 288 |
+| loaded visibility Dmax p50 at sat | 158.7 us | 97.3 us |
+| overhead (p1) | 2.5 to 5.3% | ~0 to 3.0% |
+| safety naive / issue-naive / poison | 0 / 0 / 10,000 corrupt | same |
+| coop U=1 / U=16 e2e p50 | 15.4 / 34.8 us | 22.5 / 41.0 us |
+| reserved R=8 U=16 e2e p50 | 175.1 us | 195.3 us |
+
+Predictions vs got: confirmed - occupancy, floor visibility (1 quantum,
+flat), boundary 45-75, stage 15-25, safety signature, per-part
+constants. FALSIFIED, both in the informative direction: (1) loaded
+visibility did not shrink with 3x bandwidth and 40 MB L2; it GREW
+(158.7 vs 97.3 us). (2) Co-residency wall stretch did not drop below
+1.6x; p99/p50 is ~3.9, like GA102's ~3.4. Conclusion: straggler tails
+under co-residency are architectural contention physics, not bandwidth
+famine; memory headroom does not buy them back. Overhead prediction
+missed at low blocks (5.3% at 108) but sits far inside the falsifier.
+
+The decomposition transfers across the Ampere family: notification is
+one timer quantum everywhere; the bound is the worst in-flight tile;
+the hazard signature is unchanged. The constants are per-part and
+reported per part. "Ampere-class" is now earned by measurement at both
+ends of the family, on the same silicon the comparison literature
+reports on: stage-granularity in-kernel handoff at 16.4 us p50 on an
+A100, from user space, on a stock driver.
+
+**Next:** the paper rewrite. Every registered construct (A1-A4) is
+answered; 15 faults on the record; nothing further blocks prose.
