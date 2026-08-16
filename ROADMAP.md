@@ -13,12 +13,15 @@ numbers, in either direction.
 | 3 | Naive yield. Two numbers: latency and overhead | Done |
 | 4 | Surface: block count x poll period | Done |
 | 5 | Safety: forced mid-pipeline yield, float64-verified | Done |
+| 5a | Amendments A1 to A4: site logging, atomic flag, urgent queue, reserved arm | Done |
+| 5b | sm_80 anchor on an A100, predictions registered first | Done |
+| 5c | Scheduler oracle: exact execution-count invariants | Done |
+| 5d | Tensor-core generalization at 1 block/SM | Done |
 | 6 | Optional: port the yield into MegaQwen | Not started |
-| 7 | Writeup | Not started |
+| 7 | Writeup | Draft complete. Freeze items: compile check, artifact packaging, reading queue |
 
-Results for phases 1 to 5 are in [`RESULTS.md`](RESULTS.md). Each phase
-has one script in [`scripts/`](scripts/) and one binary in
-[`src/`](src/).
+Results are in [`RESULTS.md`](RESULTS.md). Each measurement has one
+script in [`scripts/`](scripts/) and one binary in [`src/`](src/).
 
 ## Kill criteria (none fired)
 
