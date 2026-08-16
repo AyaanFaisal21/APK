@@ -91,7 +91,14 @@ __global__ void __launch_bounds__(THREADS) persistent_bg(
 // A3 reserved arm: the urgent job is U blocks, block b computing tile b —
 // distinct real work per block, written compactly per block. uEndGT is an
 // atomicMax so it holds the LAST block's completion (job-level e2e).
-__global__ void __launch_bounds__(THREADS) urgent_tile(
+//
+// The launch-bounds min-blocks pin is load-bearing (fault 13): without it
+// this kernel compiled to 79 registers, which does not fit the 16,384
+// registers a 3-way-occupied SM has spare, so the urgent job waited for
+// full drain DESPITE reserved slots. Reservation is denominated in
+// resource envelopes, not slot counts; the pin caps this kernel at 64
+// registers so it fits the envelope its own reservation frees.
+__global__ void __launch_bounds__(THREADS, 4) urgent_tile(
     const float* __restrict__ A, const float* __restrict__ B,
     float* __restrict__ Cu, int K, int N, int tilesN, long long* uStartGT,
     unsigned long long* uEndGT) {
