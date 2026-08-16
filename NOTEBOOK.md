@@ -474,3 +474,16 @@ A100, from user space, on a stock driver.
 
 **Next:** the paper rewrite. Every registered construct (A1-A4) is
 answered; 15 faults on the record; nothing further blocks prose.
+
+## 2026-08-15. Amendment: A100 loaded-visibility value corrected
+
+The A100 entry above attributed 158.7 us to the 432-block loaded cell.
+Recomputation from the retained observation matrix (visl_b432.bin)
+gives Dmax p50 3776.5 us, p99 4853.8 us; the 158.7 line in the run log
+belongs to 324 blocks. Fault 16, class: log-scrape misattribution,
+caught by recomputing from raw data before figure generation. The A10
+288 bins match their log lines exactly, validating the log-sourced
+rows. Consequence: the falsified bandwidth prediction is stronger than
+recorded; under full-occupancy DRAM streaming a straggling block can
+stall for milliseconds. visibility.csv now carries a source column
+(bin vs log) and the paper cites the bin-computed value.

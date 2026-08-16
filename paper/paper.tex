@@ -350,6 +350,23 @@ finish.
 \subsection{Scaling: straggler physics, not propagation}
 \label{sec:surface}
 
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/handoff.png}
+  \caption{Generated from committed summary data by committed scripts.
+  (a)~Handoff latency versus resident blocks per poll period (A10,
+  atomic build): latency scales with poll period and co-residency, not
+  block count per se. (b)~The corrected notification construct:
+  across-block maximum delay, floor versus loaded variants, both parts,
+  log scale; the floor sits on the timer quantum everywhere while the
+  loaded tail grows with memory-system occupancy---and grows
+  \emph{more} on the higher-bandwidth part. (c)~The reserved-capacity
+  Pareto: cooperative handoff (green) is flat in urgent size $U$;
+  reservation (purple) is cheap but cliffs when $U$ exceeds reserved
+  slots.}
+  \label{fig:main}
+\end{figure}
+
 \begin{table}[t]
   \centering
   \caption{A10 surface at poll period 1, setter-excluded, atomic build
@@ -371,7 +388,7 @@ finish.
   \end{tabular}
 \end{table}
 
-Table~\ref{tab:surface}: the epoch never exceeds three timer quanta at
+Table~\ref{tab:surface} and Figure~\ref{fig:main}a: the epoch never exceeds three timer quanta at
 poll period~1 and does not grow with block count (at higher poll
 periods the first-observation statistic includes polling alignment by
 definition and reaches 6.1\us{} at $(16,8)$---scoped accordingly).
@@ -689,32 +706,35 @@ Algorithms.
 \newblock ESEC/FSE 2017.
 
 \bibitem{gpreempt}
-Fan et al.
+R.~Fan, T.~Ren, M.~Xie, S.~Gao, J.~Shu, and Y.~Lu.
 \newblock GPreempt: GPU Preemptive Scheduling Made General and
 Efficient.
 \newblock USENIX ATC 2025.
 
 \bibitem{valve}
-Valve authors (PKU/Tencent).
-\newblock Valve: Channel-level preemption for GPU sharing in
-production.
+F.~Liu, H.~Liu, X.~Lyu, S.~Ai, H.~Liang, L.~Chen, Z.~Hu, C.~Zha,
+X.~Jin, H.~Luo, and P.~Chen.
+\newblock Valve: Production Online-Offline Inference Colocation with
+Jointly-Bounded Preemption Latency and Rate.
 \newblock arXiv:2604.07874, 2026.
 
 \bibitem{concordia}
-Concordia authors (UCSC/ByteDance).
-\newblock Concordia: Checkpointing hooks for persistent GPU kernels.
+Y.~Gan, Y.~Yang, Y.~Li, X.~Gao, Y.~Wang, R.~Jiang, X.~Ding, A.~Quinn,
+and C.~Qian.
+\newblock Concordia: JIT-Compiled Persistent-Kernel Checkpointing for
+Fault-Tolerant LLM Inference.
 \newblock arXiv:2606.23521, 2026.
 
 \bibitem{reef}
-M.~Han et al.
-\newblock REEF: Microsecond-scale preemption for concurrent
-GPU-accelerated DNN inferences.
+M.~Han, H.~Zhang, R.~Chen, and H.~Chen.
+\newblock Microsecond-scale Preemption for Concurrent GPU-accelerated
+DNN Inferences.
 \newblock OSDI 2022.
 
 \bibitem{effisha}
-G.~Chen et al.
-\newblock EffiSha: A software framework for enabling efficient
-preemptive scheduling of GPU.
+G.~Chen, Y.~Zhao, X.~Shen, and H.~Zhou.
+\newblock EffiSha: A Software Framework for Enabling Efficient
+Preemptive Scheduling of GPU.
 \newblock PPoPP 2017.
 
 \bibitem{cudart}
