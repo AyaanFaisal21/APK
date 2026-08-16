@@ -686,3 +686,49 @@ tightened for next use.
 
 The idempotence blind spot named by reviews 3 through 6 is closed:
 "suffices" now rests on exact structural invariants, not numerics.
+
+## 2026-08-15. Tensor-core pipeline (the generalization test): design and predictions
+
+Instrument: src/tcyield.cu. One task = one 128x128 output tile,
+C(fp32) = A(fp16) x B(fp16), wmma 16x16x16 fragments, 8 warps at
+32x64 per warp, BK=32 chunks, THREE cp.async stages through ~56 KB of
+dynamic shared memory per block. K is the duration knob. The
+scheduling instrument is copied from the proven midyield skeleton:
+fetch-add queue, dev-set events at stage boundaries, barrier-protected
+snapshot checkpoints, yield-site logging, drain/naive/poison
+disciplines, oracle counters through device globals.
+
+This is a CUTLASS-CLASS kernel, not the CUTLASS library: instrumenting
+the library mainloop would modify it anyway, and the hypothesis is
+about the resource and pipeline regime (occupancy, register pressure,
+staging depth), which this reproduces. Recorded plainly so the paper
+can say it plainly.
+
+Predictions, before any run:
+- Occupancy lands at 1 block/SM (smem ~56 KB and ~130-170 registers
+  both bind); saturation = 72 blocks. Consequence: NO co-residency
+  wall stretch; latency should sit near ONE tile time with a tight
+  distribution, unlike the SGEMM surface.
+- Tile duration calibratable into 15-40 us at K in {128, 256, 512}.
+- Verification passes against float64-of-fp16-quantized inputs at
+  rtol = atol = 1e-3 (fp32 accumulation; reassociation error only).
+- Boundary-poll overhead <= 1.5% (bigger tiles amortize the poll);
+  stage-poll <= 4%.
+- Boundary latency p50 within 1.5x of tile p50; stage latency p50
+  roughly tile/nChunks-scale; e2e beats the 1/SM SGEMM analog.
+- Safety: drain 0 corrupt, poison 100%, naive 0 at this geometry
+  (same L2-residency reasoning; sources ~1-2 MB); oracle exact.
+- The failure-watch (questionable-results checklist, per the session
+  instruction): (a) wmma tile correctness is the largest risk - the
+  float64 gate decides, nothing ships without it; (b) event/poll code
+  may push registers past a spill cliff at this pressure - ptxas
+  reported per variant, comparisons stay within-binary; (c) grid==72
+  is fault-6's bistable shape - overhead drains checked for
+  bimodality before any A/B claim; (d) at 1/SM the setter (block 0)
+  self-delay artifact returns in force - setter-excluded stats only;
+  (e) this box is a 1050 MHz sag part - all constants are per-part
+  and the lock is already verified under load.
+
+Falsifiable stake: if overhead or latency degrade qualitatively (>10%
+overhead, or latency >> one tile), the synthetic-kernel conclusion
+does not generalize and the paper reports where it breaks.
