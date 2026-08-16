@@ -487,3 +487,41 @@ rows. Consequence: the falsified bandwidth prediction is stronger than
 recorded; under full-occupancy DRAM streaming a straggling block can
 stall for milliseconds. visibility.csv now carries a source column
 (bin vs log) and the paper cites the bin-computed value.
+
+## 2026-08-15. Review 3 response: revision pass applied
+
+Concessions and upgrades applied to the paper; two review points were
+answered with new analysis from retained matrices rather than conceded
+(scripts/heldout_maxofn.py, results/summary/heldout_maxofn.csv):
+
+- Floor visibility is an every-event statement: 0 of 19,800 events on
+  either part exceeded one observed quantum; stated as elapsed < 2
+  quanta under the quantization model (review point 2 asked for the
+  conservative form; the data supports the absolute form).
+- Held-out independence test (fit half, predict half, four quantiles):
+  A100 exact to the quantum at p50/p90/p95/p99; A10 p50 within 5%,
+  p99 over-predicted 20% (measured tails LIGHTER than independence;
+  the model is a conservative envelope there). Per-block product model
+  is identical to pooled, so worker heterogeneity (3x spread in
+  per-block medians) does not move the maximum. Pairwise correlations
+  in [-0.11, 0.04] over 300 pairs, both parts. Registered prediction
+  (SM-level correlation breaks the fit) confirmed wrong.
+
+Conceded and rewritten: abstract floor/loaded split (the contradiction
+with the visibility section); every non-structural use of "bound";
+drain upgraded from "insurance" to semantically-required-by-PTX with
+the timing account demoted to non-manifestation explanation; loaded
+causal language withdrawn (mechanism unisolated; falsified prediction
+kept); ExpertPlex notification-path equivalence narrowed (our floor is
+one-CTA dissemination, not their six-stage epoch); barrier mechanism
+softened to consistent-with; hang-to-corruption transformation claim
+dropped; symmetric envelope constraint on both Pareto arms; negative
+reservation cost demoted to anomaly confounded with per-part sag
+(cross-card drains implicate box 3; A100 shows no effect); scope cuts
+("like most below Hopper" out; "Ampere family" -> both measured
+parts); Concordia precise; Ada-MK cited, MegaQwen footnoted.
+
+Open items carried in Threats: exact per-task execution/generation
+oracle (designed, needs one validation run), loaded-visibility
+mechanism isolation, small-R anomaly sweep. Tensor-core
+generalization stays behind all three.
