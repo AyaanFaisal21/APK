@@ -539,8 +539,15 @@ result shows congestion can stretch memory operations by orders of
 magnitude) is the identified lever for making the undefined variant
 fail. The drain discipline costs nothing measurable here---
 SASS-identical hot loop, identical latency---and is the only variant
-with defined behavior. Stage-granularity checkpointing is also the latency
-payoff: 17.4/22.5\us{} p50/p99 at A10 saturation, 16.4/21.5\us{} on
+with defined behavior. \textbf{Protocol exactness.} Because tile writes are idempotent, a
+numerical check cannot see duplicate execution, stale generations, or
+wrong ownership. Exact invariants can: across ${\sim}185$M bounded
+task executions and 40{,}000 events spanning both instruments---
+including the claimer's abandon-and-restart path and the window-forced
+geometry---every popped task executed exactly once, every fired event
+completed exactly its urgent-queue count, and every event has a
+recorded claimant. Zero violations. Stage-granularity checkpointing is
+also the latency payoff: 17.4/22.5\us{} p50/p99 at A10 saturation, 16.4/21.5\us{} on
 the A100---for 5.0\% and 2.5\% overhead respectively.
 
 \textbf{The hazard that did fire.} The only silent corruption in the

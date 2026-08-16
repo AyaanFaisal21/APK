@@ -658,3 +658,31 @@ The paper's "same 4400 SASS instructions under either protocol"
 statement describes the volatile-vs-atomic comparison at its own
 commit and remains true as scoped; reproducing it requires that
 commit, which the artifact's git history provides.
+
+## 2026-08-15. Oracle verdict: all invariants hold exactly
+
+Third launch clean (guard 4512, lock 1050 on this part -- another sag
+unit like box 3, caught by the per-box check). The four runs:
+
+| run | tasks checked | dup | miss | events | violations | unclaimed |
+|---|---|---|---|---|---|---|
+| yield U=1 | 42,278,900 | 0 | 0 | 10,000 | 0 | 0 |
+| yield U=16 | 42,283,728 | 0 | 0 | 10,000 | 0 | 0 |
+| midyield stage/drain | 50,971,832 | 0 | 0 | 10,000 | 0 | 0 |
+| midyield issue/naive | 49,789,964 | 0 | 0 | 10,000 | 0 | 0 |
+
+~185M bounded task executions, exactly-once everywhere; every event
+claimed with correct urgent counts, through the abandon-and-restart
+path and the window-forced geometry. Safety counters unchanged
+(0/10,000 corrupt both midyield runs). Prediction held exactly.
+
+The sanitizer-gate small config FAILED by completeness (0 events
+fired), diagnosed as a sizing artifact: the probe measures ~190x
+slower under instrumentation, the bounded run shrinks to 239 tasks and
+drains before the first gap elapses. Zero invariant violations, zero
+sanitizer errors. Gate note: the run script's oracle gate checked only
+that output existed, not that it said PASS; sloppy, harmless here,
+tightened for next use.
+
+The idempotence blind spot named by reviews 3 through 6 is closed:
+"suffices" now rests on exact structural invariants, not numerics.
