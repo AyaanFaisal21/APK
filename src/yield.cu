@@ -759,6 +759,10 @@ int main(int argc, char** argv) {
                         cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(hClaim.data(), dClaim, evAlloc * sizeof(int),
                         cudaMemcpyDeviceToHost));
+  std::vector<unsigned long long> hUEnd(evAlloc);
+  CUDA_CHECK(cudaMemcpy(hUEnd.data(), dUEndMax,
+                        evAlloc * sizeof(unsigned long long),
+                        cudaMemcpyDeviceToHost));
   dump_obs(hSetGT, hObs, events, blocks);
 
   std::vector<double> lat, latX0, spread, e2e, firstDelay, b0Delay;
