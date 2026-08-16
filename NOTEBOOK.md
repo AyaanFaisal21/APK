@@ -330,3 +330,54 @@ Predictions, before any run:
   only on latency, never on throughput. Falsifier: if reserved R=1/U=1
   beats cooperative U=1 by more than 2x on p99, spatial headroom owns
   the small-urgent regime and the paper says so.
+
+## 2026-08-15. A3 Pareto: results
+
+Gates clean (2x sanitizer 0 errors, multi-tile verifies pass). One
+instrument fault before valid data:
+
+- Fault 13: the unpinned urgent kernel compiled to 79 registers and
+  could not fit the 16,384 registers a 3-way-occupied SM has spare.
+  Symptom: urgent jobs waited full drain DESPITE reserved slots, at
+  every R, indistinguishable from no reservation. Fix: launch-bounds
+  pin to 64 registers. Kept as a result: reservation is denominated in
+  resource envelopes, not slot counts. An urgent kernel that outgrows
+  the envelope gets nothing from the reservation.
+
+Corrected table (p50/p99 us, 10k trials or events per cell; full table
+in results/summary/pareto.csv):
+
+| config | rate loss | e2e p50 | e2e p99 |
+|---|---|---|---|
+| reserved R=1, U=1 | -5.4% | 95.4 | 113.7 |
+| reserved R=1, U=16 | -4.0% | 964.0 | 1338.0 |
+| reserved R=8, U=16 | +0.5% | 195.3 | 215.4 |
+| reserved R=32, U=16 | +1.5% | 111.3 | 124.9 |
+| coop U=1 | +2.9% | 22.5 | 37.9 |
+| coop U=16 | +3.4% | 41.0 | 79.9 |
+
+Predictions vs got:
+
+- Wave scaling: confirmed exactly. R=1/U=16 gives 964 us (predicted
+  >= 350, ceil(U/R) waves); R=8/U=16 gives 2 waves; latency flattens
+  once R >= U.
+- Cooperative flat in U: confirmed. 22.5 to 41.0 us p50 from U=1 to 16
+  (1.8x for 16x the work); p99 stays under 80 us.
+- Falsifier did not fire: cooperative beats reserved R=1/U=1 by 3x on
+  p99 (37.9 vs 113.7), not the reverse.
+- One prediction INVERTED: the throughput axis. Predicted cooperative
+  cheaper; measured reservation cheaper. Removing 1 to 4 blocks from
+  the 288-block grid RAISES drain throughput (negative loss, -5.4% at
+  R=1): the last co-resident blocks cost more in wall-stretch than
+  they contribute. Cooperative pays its ~2.9% poll overhead always.
+  The saturated grid is not throughput-optimal; the Pareto verdict is
+  therefore a true tradeoff, not dominance: reservation buys cheap
+  throughput and 100 us-class latency IF the job fits both the slot
+  count and the resource envelope; cooperative handoff buys 22 to 41 us
+  latency, flat in urgent size, for ~3% throughput, with no envelope
+  constraint and no wave cliff.
+
+A1, A2, A3, and the A-flag rerun are now all answered. The measurement
+set for the revised paper is complete.
+
+**Next:** the paper rewrite on corrected constructs.
