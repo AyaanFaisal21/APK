@@ -634,3 +634,27 @@ paper's "suffices" claim fails as stated. Also predicted: the
 non-oracle SASS guard passes (4400 unchanged), and the per-box
 under-load clock check on this new part determines the lock (1200 if
 it holds like boxes 1-2, 1050 if it sags like box 3).
+
+## 2026-08-15. Oracle run: two guard firings before valid data
+
+Fault 5's guard earned its keep twice in one session:
+
+- Firing 1 (real): adding the oracle counters as kernel parameters
+  shifted the non-oracle hot kernel 4400 -> 4512 instructions. The
+  template isolated the code but not the signature. Fix: counters
+  moved to device globals set by cudaMemcpyToSymbol; measurement
+  variants reference them only under a compile-time-false branch.
+- Firing 2 (stale baseline; fault 18): the guard still failed at 4512
+  because 4400 was the review-2-era count. Building the pre-oracle
+  parent commit on the same box shows the hot kernel moved to 4512 at
+  the A3 urgent-queue rework, which ran unguarded. The oracle edit is
+  codegen-clean by the strongest test: equality with its parent. The
+  Pareto measurements were taken with the 4512 kernel and are
+  internally consistent (within-binary comparisons throughout).
+  Rule: a guard baseline is re-pinned whenever a feature lands, or the
+  guard becomes a historian. Guard now asserts 4512.
+
+The paper's "same 4400 SASS instructions under either protocol"
+statement describes the volatile-vs-atomic comparison at its own
+commit and remains true as scoped; reproducing it requires that
+commit, which the artifact's git history provides.
