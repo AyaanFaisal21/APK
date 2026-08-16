@@ -80,14 +80,19 @@
 // runtime parameter it pushed the POLL variant into register spills under
 // the pin (36B stores/tile) while POLL=false stayed spill-free, faking a
 // ~10% "overhead" that was really asymmetric spill traffic.
-template <bool POLL, int PE>
+// ORACLE is a template parameter so the counting instrumentation cannot
+// perturb the measurement instantiations (fault 5: runtime parameters
+// changed codegen). Non-oracle instantiations must stay SASS-identical;
+// the run script asserts it.
+template <bool POLL, int PE, bool ORACLE = false>
 __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
     const float* __restrict__ A, const float* __restrict__ B,
     float* __restrict__ C, float* __restrict__ Cu, int K, int N, int tilesN,
     int totalTiles, unsigned numTasks, unsigned int* nextTask,
     int* flag, const long long* schedGapsNs, int numEvents,
     long long* setGT, long long* obsGT, int* claim, long long* uGT,
-    int urgentTiles, int* uqNext, unsigned long long* uEndMax) {
+    int urgentTiles, int* uqNext, unsigned long long* uEndMax,
+    int* execCount, int* uExecCount) {
   __shared__ unsigned s_task;
   __shared__ int s_flag;
   __shared__ int s_claimed;
@@ -161,6 +166,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
         }
         tile_gemm(A, B, Cu, K, N, 0, 0, TN, 0, 0);
         __syncthreads();
+        if (ORACLE && threadIdx.x == 0) atomicAdd(&uExecCount[f - 1], 1);
         popped = true;
       }
       if (popped && threadIdx.x == 0) {
@@ -186,6 +192,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
     const int c = (tile % tilesN) * TN;
     tile_gemm(A, B, C, K, N, r, c, N, r, c);
     __syncthreads();
+    if (ORACLE && threadIdx.x == 0) atomicAdd(&execCount[task], 1);
   }
 }
 
@@ -403,29 +410,29 @@ int main(int argc, char** argv) {
     if (!poll) {
       persistent_yield<false, 1><<<blocks, THREADS, 0, kStream>>>(
           dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-          nullptr, 0, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
+          nullptr, 0, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax, nullptr, nullptr);
       return;
     }
     switch (pollEvery) {
       case 1:
         persistent_yield<true, 1><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax, nullptr, nullptr);
         break;
       case 2:
         persistent_yield<true, 2><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax, nullptr, nullptr);
         break;
       case 4:
         persistent_yield<true, 4><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax, nullptr, nullptr);
         break;
       case 8:
         persistent_yield<true, 8><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax, nullptr, nullptr);
         break;
       default:
         fprintf(stderr, "--poll-every must be 1, 2, 4, or 8\n");
@@ -551,6 +558,103 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaFree(dSink));
     CUDA_CHECK(cudaFree(dIter));
     return 0;
+  }
+
+  // ------------------------------------------------------------ oracle
+  // Exact scheduler invariants (the one correctness gap the numerical
+  // oracle cannot see, because tile writes are idempotent): every popped
+  // task id executes exactly once; every fired event completes exactly
+  // urgentTiles urgent executions; every fired event has a claimant.
+  // Bounded run so the invariants are exact, not statistical.
+  if (mode == "oracle") {
+    CUDA_CHECK(cudaMemset(dNext, 0, sizeof(unsigned int)));
+    CUDA_CHECK(cudaMemset(dFlag, 0, sizeof(int)));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    const unsigned probeTasks = (unsigned)blocks * 200;
+    long long t0 = now_ns();
+    launch(true, probeTasks, nullptr, 0);
+    CUDA_CHECK(cudaStreamSynchronize(kStream));
+    const double usPerTask = (now_ns() - t0) / 1e3 / probeTasks;
+
+    std::mt19937 rng(21);
+    std::uniform_real_distribution<double> gapDist(gapMinUs * 1000.0,
+                                                   gapMaxUs * 1000.0);
+    std::vector<long long> gaps(evAlloc);
+    long long acc = 0;
+    for (int e = 0; e < events; ++e)
+      gaps[e] = (acc += (long long)gapDist(rng));
+    CUDA_CHECK(cudaMemcpy(dSched, gaps.data(),
+                          (size_t)evAlloc * sizeof(long long),
+                          cudaMemcpyHostToDevice));
+    unsigned oTasks = (unsigned)(1.5 * (acc / 1e3) / usPerTask);
+    if (oTasks > 60000000u) oTasks = 60000000u;
+    printf("oracle: probe %.3f us/task -> %u bounded tasks for a %.0f ms "
+           "schedule, urgent-tiles=%d\n",
+           usPerTask, oTasks, acc / 1e6, urgentTiles);
+
+    int *dExecCount, *dUExec;
+    CUDA_CHECK(cudaMalloc(&dExecCount, (size_t)oTasks * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&dUExec, (size_t)evAlloc * sizeof(int)));
+    CUDA_CHECK(cudaMemset(dExecCount, 0, (size_t)oTasks * sizeof(int)));
+    CUDA_CHECK(cudaMemset(dUExec, 0, (size_t)evAlloc * sizeof(int)));
+    zero_all();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    persistent_yield<true, 1, true><<<blocks, THREADS, 0, kStream>>>(
+        dA, dB, dC, dCu, K, N, tilesN, totalTiles, oTasks, dNext, dFlag,
+        dSched, events, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext,
+        dUEndMax, dExecCount, dUExec);
+    CUDA_CHECK(cudaStreamSynchronize(kStream));
+    CUDA_CHECK(cudaGetLastError());
+
+    std::vector<int> hExec(oTasks), hUExec(evAlloc), hClaimO(evAlloc);
+    std::vector<long long> hSetO(evAlloc);
+    CUDA_CHECK(cudaMemcpy(hExec.data(), dExecCount,
+                          (size_t)oTasks * sizeof(int),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hUExec.data(), dUExec, evAlloc * sizeof(int),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hClaimO.data(), dClaim, evAlloc * sizeof(int),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hSetO.data(), dSetGT, evAlloc * sizeof(long long),
+                          cudaMemcpyDeviceToHost));
+
+    long long dup = 0, missed = 0;
+    int firstBadTask = -1;
+    for (unsigned t = 0; t < oTasks; ++t) {
+      if (hExec[t] != 1) {
+        if (hExec[t] > 1) ++dup;
+        else ++missed;
+        if (firstBadTask < 0) firstBadTask = (int)t;
+      }
+    }
+    int fired = 0, badU = 0, unclaimed = 0, firstBadEv = -1;
+    for (int e = 0; e < events; ++e) {
+      if (hSetO[e] == 0) continue;
+      ++fired;
+      if (hUExec[e] != urgentTiles) {
+        ++badU;
+        if (firstBadEv < 0) firstBadEv = e;
+      }
+      if (hClaimO[e] == 0) ++unclaimed;
+    }
+    printf("oracle tasks: %u checked | duplicates %lld | missed %lld",
+           oTasks, dup, missed);
+    if (firstBadTask >= 0)
+      printf(" | first bad task %d (count %d)", firstBadTask,
+             hExec[firstBadTask]);
+    printf("\n");
+    printf("oracle events: %d fired | urgent-count violations %d | "
+           "unclaimed %d", fired, badU, unclaimed);
+    if (firstBadEv >= 0)
+      printf(" | first bad event %d (count %d)", firstBadEv,
+             hUExec[firstBadEv]);
+    printf("\n");
+    const bool pass = dup == 0 && missed == 0 && badU == 0 &&
+                      unclaimed == 0 && fired == events;
+    printf("ORACLE: %s\n", pass ? "PASS" : "FAIL");
+    CUDA_CHECK(cudaFree(dExecCount));
+    CUDA_CHECK(cudaFree(dUExec));
+    return pass ? 0 : 1;
   }
 
   // ------------------------------------------------------------ overhead

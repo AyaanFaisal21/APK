@@ -604,3 +604,33 @@ Review-5 pass applied in the same commit: 2.6x, abstract split
 (handoff tails smaller on A100; adversarial test worse), registered-
 threshold wording for N1/A-N1, runtime-vs-evaluation contract split,
 sm_80-anchor terminology, SOTA removed, six audit-history cuts.
+
+## 2026-08-15. Scheduler oracle: built and predicted (box 5, us-west A10)
+
+The one correctness gap named by three review rounds: idempotent tile
+writes make duplicate execution, stale generations, and wrong
+ownership invisible to the numerical oracle. Built now as exact
+structural invariants, template-isolated (ORACLE parameter) so the
+measurement instantiations stay SASS-identical; the run script asserts
+the 4400-instruction count of the non-oracle hot kernel.
+
+Invariants checked, bounded runs so they are exact, not statistical:
+- execution_count[task] == 1 for every task id below the bound
+  (duplicates and misses both counted, first offender reported);
+- urgent completions per fired event == urgent-queue size (yield) and
+  == 1 (midyield, including through the claimer's abandon-and-restart
+  path, which must still produce exactly one background writeback);
+- every fired event has a recorded claimant; all events fire.
+
+Runs: yield oracle U=1 and U=16 (10k events each, ~31M-task bounds);
+midyield events --oracle for stage/drain and the window-forced
+issue/naive (10k each).
+
+Predictions, filed before the runs: every invariant holds exactly in
+all four runs -- zero duplicates, zero misses, zero urgent-count
+violations, zero unclaimed events. This is falsifiable in the
+strongest sense: any single violation is a protocol bug and the
+paper's "suffices" claim fails as stated. Also predicted: the
+non-oracle SASS guard passes (4400 unchanged), and the per-box
+under-load clock check on this new part determines the lock (1200 if
+it holds like boxes 1-2, 1050 if it sags like box 3).

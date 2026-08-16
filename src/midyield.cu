@@ -86,14 +86,14 @@ __device__ __forceinline__ void cp_wait_one_outstanding() {
 enum PollMode { POLL_OFF = 0, POLL_BOUNDARY = 1, POLL_STAGE = 2, POLL_ISSUE = 3 };
 enum Discipline { DISC_DRAIN = 0, DISC_NAIVE = 1, DISC_POISON = 2 };
 
-template <int POLLMODE, int DISC>
+template <int POLLMODE, int DISC, bool ORACLE = false>
 __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
     const float* __restrict__ A, const float* __restrict__ B,
     float* __restrict__ C, float* __restrict__ CuAll, int K, int N,
     int tilesN, int totalTiles, unsigned numTasks, unsigned int* nextTask,
     int* flag, const long long* schedGapsNs, int numEvents,
     long long* setGT, long long* obsGT, int* claim, int* claimSite,
-    long long* uGT) {
+    long long* uGT, int* execCount, int* uExecCount) {
   __shared__ float As[2][TM][KBP];
   __shared__ float Bs[2][KBP][TN];
   __shared__ unsigned s_task;
@@ -165,7 +165,10 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
       for (int j = 0; j < 4; ++j)
         Cu[(ty * 4 + i) * TN + (tx * 4 + j)] = uacc[i][j];
     __syncthreads();
-    if (threadIdx.x == 0) uGT[2 * (size_t)event + 1] = globaltimer_ns();
+    if (threadIdx.x == 0) {
+      uGT[2 * (size_t)event + 1] = globaltimer_ns();
+      if (ORACLE) atomicAdd(&uExecCount[event], 1);
+    }
   };
 
   // Event checkpoint. Returns true (uniformly) when this block claimed the
@@ -307,6 +310,7 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_midyield(
             C[r * N + (colBase + tx * 4 + j)] = acc[i][j];
         }
         __syncthreads();
+        if (ORACLE && threadIdx.x == 0) atomicAdd(&execCount[task], 1);
       }
     }
   }
@@ -352,6 +356,7 @@ int main(int argc, char** argv) {
   const double gapMaxUs = parse_arg(argc, argv, "--gap-max-us", 400);
   int blocks = (int)parse_arg(argc, argv, "--blocks", 0);
   const int warmupEvents = (int)parse_arg(argc, argv, "--warmup-events", 100);
+  const bool oracle = parse_arg(argc, argv, "--oracle", 0) != 0;
   const char* csvPath = parse_str(argc, argv, "--csv", "");
 
   if (K % KBP != 0 || (K / KBP) < 2) {
@@ -441,7 +446,7 @@ int main(int argc, char** argv) {
       kern<<<blocks, THREADS, 0, kStream>>>(dA, dB, dC, dCuAll, K, N, tilesN,
                                             totalTiles, nTasks, dNext, dFlag,
                                             sched, nEvents, dSetGT, dObsGT,
-                                            dClaim, dClaimSite, dUGT);
+                                            dClaim, dClaimSite, dUGT, nullptr, nullptr);
     };
     if (pm == POLL_OFF) args(persistent_midyield<POLL_OFF, DISC_DRAIN>);
     else if (pm == POLL_BOUNDARY)
@@ -628,7 +633,35 @@ int main(int argc, char** argv) {
   CUDA_CHECK(
       cudaMemset(dCuAll, 0xFF, (size_t)evAlloc * TM * TN * sizeof(float)));
   CUDA_CHECK(cudaDeviceSynchronize());
-  launch(pollI, discI, tasks, dSched, events);
+  int *dExecCount = nullptr, *dUExec = nullptr;
+  if (oracle) {
+    // Exact scheduler invariants; template instantiation so measurement
+    // kernels stay SASS-identical. Only the two headline configurations
+    // carry oracle variants.
+    CUDA_CHECK(cudaMalloc(&dExecCount, (size_t)tasks * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&dUExec, (size_t)evAlloc * sizeof(int)));
+    CUDA_CHECK(cudaMemset(dExecCount, 0, (size_t)tasks * sizeof(int)));
+    CUDA_CHECK(cudaMemset(dUExec, 0, (size_t)evAlloc * sizeof(int)));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    if (pollI == POLL_STAGE && discI == DISC_DRAIN)
+      persistent_midyield<POLL_STAGE, DISC_DRAIN, true>
+          <<<blocks, THREADS, 0, kStream>>>(
+              dA, dB, dC, dCuAll, K, N, tilesN, totalTiles, tasks, dNext,
+              dFlag, dSched, events, dSetGT, dObsGT, dClaim, dClaimSite,
+              dUGT, dExecCount, dUExec);
+    else if (pollI == POLL_ISSUE && discI == DISC_NAIVE)
+      persistent_midyield<POLL_ISSUE, DISC_NAIVE, true>
+          <<<blocks, THREADS, 0, kStream>>>(
+              dA, dB, dC, dCuAll, K, N, tilesN, totalTiles, tasks, dNext,
+              dFlag, dSched, events, dSetGT, dObsGT, dClaim, dClaimSite,
+              dUGT, dExecCount, dUExec);
+    else {
+      fprintf(stderr, "--oracle supports stage/drain and issue/naive\n");
+      return 1;
+    }
+  } else {
+    launch(pollI, discI, tasks, dSched, events);
+  }
   CUDA_CHECK(cudaStreamSynchronize(kStream));
   CUDA_CHECK(cudaGetLastError());
 
@@ -718,5 +751,38 @@ int main(int argc, char** argv) {
            percentile(first, 0.5), e2e.empty() ? -1 : percentile(e2e, 0.5));
   }
   if (csvPath[0]) printf("raw: %s\n", csvPath);
+
+  if (oracle) {
+    std::vector<int> hExec(tasks), hUExecO(evAlloc);
+    CUDA_CHECK(cudaMemcpy(hExec.data(), dExecCount,
+                          (size_t)tasks * sizeof(int),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hUExecO.data(), dUExec, evAlloc * sizeof(int),
+                          cudaMemcpyDeviceToHost));
+    long long dup = 0, missed = 0;
+    int firstBad = -1;
+    for (unsigned t = 0; t < tasks; ++t)
+      if (hExec[t] != 1) {
+        if (hExec[t] > 1) ++dup;
+        else ++missed;
+        if (firstBad < 0) firstBad = (int)t;
+      }
+    int fired = 0, badU = 0;
+    for (int e = 0; e < events; ++e) {
+      if (hSetGT[e] == 0) continue;
+      ++fired;
+      if (hUExecO[e] != 1) ++badU;
+    }
+    printf("oracle tasks: %u checked | duplicates %lld | missed %lld",
+           tasks, dup, missed);
+    if (firstBad >= 0)
+      printf(" | first bad %d (count %d)", firstBad, hExec[firstBad]);
+    printf("\n");
+    printf("oracle events: %d fired | urgent-count violations %d\n", fired,
+           badU);
+    const bool pass = dup == 0 && missed == 0 && badU == 0 && fired == events;
+    printf("ORACLE: %s\n", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+  }
   return 0;
 }
