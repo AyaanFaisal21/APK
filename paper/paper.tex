@@ -58,7 +58,15 @@ $3.0\times10^{-4}$ per 10k), while a planted-fault control was caught
 the PTX memory model regardless---the experiment shows
 non-manifestation, not permission. The one failure class that did
 occur was control divergence in the check protocol, manifesting as
-silent corruption rather than a hang. Measured handoff stays residual-work dominated on both parts---its
+silent corruption rather than a hang. (5)~A tensor-core
+generalization---a CUTLASS-class fp16 \texttt{wmma} pipeline at
+1 block/SM---transfers the safety signature and the exactly-once
+scheduler oracle whole, and falsifies the registered cost prediction
+informatively: with no co-resident block to hide per-site barrier and
+flag traffic, stage-granular checkpoints price at 13.7--14.7\%
+(crossing the 10\% falsifier) while tile-boundary checkpoints hold
+3\%, making checkpoint cost an occupancy-scoped property of site
+density. Measured handoff stays residual-work dominated on both parts---its
 tails were in fact smaller on the A100---while the saturated-memory
 observation test degraded from 97\us{} to 3.78\,ms on $2.6\times$ the
 bandwidth and $6.7\times$ the L2.
@@ -160,6 +168,16 @@ Contributions, each a measurement on registered constructs:
   sublinearly in urgent size---$16\times$ the work costs $1.8\times$
   at p50 (22.5${\to}$41\us)---for ${\sim}3$\%
   (Section~\ref{sec:pareto}).
+\item \textbf{The hostile-occupancy generalization.} A CUTLASS-class
+  tensor-core pipeline (fp16 \texttt{wmma}, three \texttt{cp.async}
+  stages, 56.8\,KB shared memory, 1 block/SM) transfers the safety
+  signature and the exactly-once oracle whole and falsifies the
+  registered stage-cost prediction: per-stage checkpoints price at
+  13.7--14.7\% when no co-resident block hides the site's barrier and
+  flag traffic---decomposed by measurement into an avoidable
+  0.87\us{} flag round trip and an irreducible 0.24\us{} barrier
+  term---while tile-boundary checkpoints hold 3\%
+  (Section~\ref{sec:tc}).
 \item \textbf{An sm\_80 anchor.} The decomposition
   transfers to sm\_80 (A100: stage handoff 16.4/21.5\us{} at 432-block
   saturation); two registered predictions about memory headroom were
@@ -168,7 +186,8 @@ Contributions, each a measurement on registered constructs:
 \end{enumerate}
 
 Constants are per-part and never blended. The study is a
-characterization: two GPU models, one kernel family, synthetic tiles;
+characterization: two GPU models, one kernel family on the synthetic
+surfaces plus one tensor-core pipeline at a single design point;
 Section~\ref{sec:threats} states the limits. Code, registered claims,
 summary data with the scripts that generate every table, and a run log
 including every recorded fault are
@@ -647,6 +666,65 @@ The decomposition---floor notification below instrument resolution,
 tile term dominant, hazard in control flow---reproduces on both
 measured Ampere parts; the constants are per-part.
 
+\subsection{The tensor-core pipeline: checkpoint cost follows
+occupancy}
+\label{sec:tc}
+
+The generalization test the registered failure-watch called the axis
+most likely to falsify: a CUTLASS-class kernel---one
+$128{\times}128$ fp32-accumulated tile of fp16 inputs per task, wmma
+fragments, eight warps, a three-stage \texttt{cp.async} pipeline
+through 56.8\,KB of dynamic shared memory---behind the same
+scheduling skeleton. (CUTLASS-class, not the CUTLASS library: the
+hypothesis is about the resource regime, and instrumenting the
+library's mainloop would modify it anyway.) Occupancy binds exactly
+as predicted, and it is the hostile shape the SGEMM instruments never
+reached: 1 block/SM, saturation 72, no co-resident block to hide
+anything. Gates first, as always: float64 verification of every
+output tile (max rel.\ err.\ $9.7{\times}10^{-6}$ at $K{=}256$,
+tolerance $10^{-3}$), poison control live on 10{,}000 of 10{,}000
+events, \texttt{memcheck} and \texttt{racecheck} clean, zero spills
+on every variant. Tile time calibrates to 10.9/17.3/30.2\us{} at
+$K{=}128/256/512$ (40\,TFLOP/s at $K{=}512$, 1050\,MHz part).
+
+\textbf{The registered predictions failed informatively.}
+Boundary-checkpoint overhead measured 2.8--3.4\% against a predicted
+${\le}1.5$\%---same order, wrong constant. Stage-checkpoint overhead
+measured 13.7--14.7\% (window-forced variant 14.0--16.5\%) against a
+predicted ${\le}4$\%, crossing the pre-registered 10\% stake: at this
+occupancy, stage-granular polling is \emph{not} cheap, and the
+synthetic surfaces understated it. The mechanism is measured, not
+conjectured, by decomposition across three implementations. A
+synchronous flag read at the checkpoint costs 42\%: the read is one
+${\sim}0.87$\us{} L2 round trip per site, the site's block-wide
+barrier converts one warp's stall into a whole-SM stall, and at
+1 block/SM no co-resident work absorbs it. Software-pipelining the
+read (loaded one stage ahead, published at the next site) removes the
+round trip and leaves 13.7--14.7\%; the residual ${\sim}0.24$\us{}
+per site is the barrier and uniform-decision machinery itself, which
+nothing at this occupancy can hide. The SGEMM surfaces never saw
+either term because co-resident blocks filled the stalls. Overhead at
+solo occupancy is therefore a property of \emph{site density}, and
+the practical trade is now a measured pair: stage-granular sites buy
+9.22\us{} median whole-grid detection (p99 10.24\us) at 13.7\% drain
+cost; tile-boundary sites buy 35.8\us{} (tile time plus one sample of
+pipelined-flag staleness) at 3.0\%. First-observer detection sits at
+2.05\us{} in both---the floor result, unchanged.
+
+\textbf{What did generalize.} The safety signature transfers whole:
+quiesced drain 0 corrupt in 10{,}000, naive mid-pipeline yield---with
+un-awaited copy groups targeting the reused staging buffers in flight
+at the dominant claim sites---0 corrupt in 10{,}000 on this geometry,
+poison 10{,}000/10{,}000. The scheduler oracle holds exactly on both
+arms: 14.3M tasks executed exactly once, every urgent tile exactly
+once, zero invariant violations. Urgent end-to-end lands at
+44.0\us{} median (stage sites) and 62.5\us{} (boundary), against
+957\us{} for no handoff at SGEMM saturation. Claim sites are heavily
+phase-clustered (one site takes 79\% of stage-arm claims; blocks stay
+phase-correlated across uniform tiles), so site histograms are
+occupancy evidence, not uniform samples---disclosed because it bounds
+what the site log can support.
+
 \section{Discussion}
 \label{sec:discussion}
 
@@ -674,7 +752,11 @@ ${\to}$ ${\sim}17$\us{} (stage checkpoints, quiesced)---the last
 inside the 2.2--25.3\us{} band of \emph{natural tile intervals}
 ExpertPlex reports on 8$\times$H800, and on A100 silicon, below the
 worst-case interval of that band, at ${\le}5\%$ cost, user-space, on a
-stock driver. Same-order comparisons only: ExpertPlex reports interval
+stock driver. The cost term is occupancy-scoped: at 1 block/SM the
+same stage-granular sites price at 13.7\% and the economical point
+moves to tile boundaries (Section~\ref{sec:tc})---the trade is
+between detection interval and drain cost, and both ends of it are
+measured. Same-order comparisons only: ExpertPlex reports interval
 bounds and aggregate scheduling overhead (${<}20$\us{} decode-side),
 not a preemption-latency distribution; ours is a distribution on
 different hardware and workload.
@@ -683,14 +765,15 @@ different hardware and workload.
 \label{sec:threats}
 
 Two GPU models, one vendor; Hopper claims are cited, not measured. One
-kernel family and tile size on the surfaces; synthetic tiles (the
-tensor-core-pipeline generalization, varying register footprint and
-stage depth---the axis most likely to falsify---is designed but
-unexecuted; a grid-synchronized megakernel is a different safety
-regime entirely). ``Saturated'' is shape-specific (registers bind at 4
-blocks/SM here; ExpertPlex-class kernels at 1--2 CTAs/SM will stretch
-differently, so the transferable claim is the decomposition, not the
-$2.3\times$). The timer quantum floors every epoch statement. The
+kernel family and tile size on the surfaces, plus one tensor-core
+pipeline at a single stage depth and register point
+(Section~\ref{sec:tc}; a sweep of stage depth and register footprint,
+and a grid-synchronized megakernel---a different safety regime
+entirely---remain unexecuted). ``Saturated'' is shape-specific
+(registers bind at 4 blocks/SM on the SGEMM surfaces; the 1 CTA/SM
+shape is now measured directly, and what transfers is the
+decomposition and the occupancy-scoping of cost, not any one
+constant). The timer quantum floors every epoch statement. The
 naive-discipline zero is geometry-scoped; causality is explicitly not
 claimed. Overhead is whole-kernel by definition; codegen shifts of the
 baseline moved solo-occupancy cells by $2$ points across builds.
