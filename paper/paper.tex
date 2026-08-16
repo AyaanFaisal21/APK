@@ -50,17 +50,18 @@ p50, p90, p95, and p99 on the A100; conservatively (measured tails
 on the A10 and 16.4/21.5\us{} on the A100---on the same silicon as the
 systems literature, from user space, on a stock driver---at
 whole-kernel overhead of 0--5.3\% against a registered 10\%
-falsifier; (4)~across 46{,}376 forced yields with verified
+falsifier; (4)~across 28{,}859 forced yields with verified
 buffer-conflict geometry, zero corruption was observed under both
 drained and undrained shared-memory reuse (one-sided 95\% bound
 $3.0\times10^{-4}$ per 10k), while a planted-fault control was caught
 10{,}000/10{,}000 times; the undrained variant remains undefined under
 the PTX memory model regardless---the experiment shows
-non-manifestation, not permission. The failure that did occur---
-twice---was control divergence in the check protocol, which manifested
-as silent corruption rather than a hang. Straggler tails, not
-notification, dominate this workload's handoff; on $3\times$ the
-bandwidth and $6.7\times$ the L2 they grew rather than shrank.
+non-manifestation, not permission. The one failure class that did
+occur was control divergence in the check protocol, manifesting as
+silent corruption rather than a hang. Measured handoff stays residual-work dominated on both parts---its
+tails were in fact smaller on the A100---while the saturated-memory
+observation test degraded from 97\us{} to 3.78\,ms on $2.6\times$ the
+bandwidth and $6.7\times$ the L2.
 \end{abstract}
 
 \section{Introduction}
@@ -77,9 +78,8 @@ LithOS~\cite{lithos} atomizes grids for the same reason.
 a persistent kernel to higher-priority work at safe points, leaving the
 kernel and its state live. The three are not interchangeable: eviction
 removes the serving engine itself, and Hummingbird explicitly
-\emph{disables} its mechanism for persistent kernels---the
-state-of-the-art microsecond-preemption system excludes this paper's
-subject by construction.
+\emph{disables} its mechanism for persistent kernels---excluding
+this paper's subject by construction.
 
 The third operation is what ExpertPlex~\cite{expertplex} builds for MoE
 serving, at tile granularity, bounded by one tile time plus one check
@@ -134,13 +134,13 @@ Contributions, each a measurement on registered constructs:
   higher-bandwidth part (Section~\ref{sec:visibility}).
 \item \textbf{Straggler statistics, held out.} Handoff latency at
   saturation is the max of per-block residuals; an independence model
-  fit on half the events predicts the other half's maximum exactly at
-  four quantiles on the A100 and conservatively (measured tails 20\%
-  lighter) on the A10, with pairwise correlations tightly around zero
+  fit on half the events predicts the other half's maximum to timer
+  resolution at four quantiles on the A100 and conservatively
+  (measured tails 20\% lighter) on the A10, with pairwise correlations tightly around zero
   (Section~\ref{sec:surface}).
 \item \textbf{A safety result stated at its true strength.} With
   yield-site logging establishing collision geometry per event, zero
-  corruption in 46{,}376 buffer-conflicting yields under two
+  corruption in 28{,}859 buffer-conflicting yields under two
   disciplines, against a poison control that fires 100\% of the time.
   We claim zero observed corruption with quantified statistical
   bounds, not causality: the drain could not be shown empirically
@@ -160,7 +160,7 @@ Contributions, each a measurement on registered constructs:
   sublinearly in urgent size---$16\times$ the work costs $1.8\times$
   at p50 (22.5${\to}$41\us)---for ${\sim}3$\%
   (Section~\ref{sec:pareto}).
-\item \textbf{A cross-architecture anchor.} The decomposition
+\item \textbf{An sm\_80 anchor.} The decomposition
   transfers to sm\_80 (A100: stage handoff 16.4/21.5\us{} at 432-block
   saturation); two registered predictions about memory headroom were
   falsified in the informative direction
@@ -171,7 +171,7 @@ Constants are per-part and never blended. The study is a
 characterization: two GPU models, one kernel family, synthetic tiles;
 Section~\ref{sec:threats} states the limits. Code, registered claims,
 summary data with the scripts that generate every table, and a run log
-including all fifteen faults found are
+including every recorded fault are
 public.\footnote{\url{https://github.com/AyaanFaisal21/APK}}
 
 \section{Background}
@@ -209,9 +209,10 @@ memory.
 \section{Registered protocol}
 \label{sec:protocol}
 
-The original claim file (thresholds verbatim below) was committed on
-2026-08-04 and never edited; all subsequent constructs were added as
-dated amendments before their data was collected. The provenance is
+The original claim file was committed on 2026-08-04; its registered
+sections were never modified, and every subsequent construct was
+appended as a dated amendment before its data was collected.
+Thresholds, condensed (the claim file is the authority): The provenance is
 the repository's public GitHub history, which predates all measurement
 commits.
 
@@ -234,9 +235,9 @@ registration cannot certify: two registered constructs did not measure
 what their names claimed, and were corrected by dated post-registration
 amendments with the registered readings co-reported
 (Section~\ref{sec:method}); (c) \emph{implementation faults}, caught
-by controls and instrumentation: fifteen are on the record, each with
-its detection mechanism, and five of them are findings in their own
-right. Registration, construct audit, and instrument controls are
+by controls and instrumentation: seventeen are on the record, each
+with its detection mechanism, and five of them are findings in their
+own right. Registration, construct audit, and instrument controls are
 different tools; conflating them is how measurement studies fail
 quietly.
 
@@ -277,8 +278,7 @@ and GA100 (measured; epoch-scale readings are reported as bounds at
 instrument resolution). The set instant is device-generated (block~0
 writes the flag at pre-scheduled instants and logs the timer at the
 write; no clock-domain crossing); a host-set cross-check agrees within
-0.6\us{} after correcting a ${\sim}10$\us{} bias in idle-measured
-calibration---idle calibrations do not transfer to loaded runs. The
+0.6\us. The
 setter's own observation is phase-locked one checkpoint behind its
 write, so all latency statistics are reported setter-excluded (at
 ${\ge}216$ blocks the setter is never the last observer; at 144 blocks
@@ -291,11 +291,9 @@ only the generation value; claims go through \texttt{atomicCAS}, and
 set timestamps are host-read only after stream synchronization, so
 nothing is published through the flag and no acquire/release pairing
 exists to serve. CUDA C\texttt{++} \texttt{volatile} carries no
-inter-thread synchronization guarantee; the previous volatile protocol
-behaved identically on these parts but was unspecified. The hot polling
-kernel is SASS-instruction-identical under both protocols (4400
-instructions), and every poll-period-1 latency cell reproduced within
-one timer quantum across the change on a third physical A10.
+inter-thread synchronization guarantee. The hot polling kernel
+compiles to the same 4400 SASS instructions under either protocol, so
+the contract costs nothing.
 
 \paragraph{Verification and controls.} Element-wise float64 reference
 checks on every output; NaN pre-fill so unexecuted work fails loudly;
@@ -304,9 +302,8 @@ checks on every output; NaN pre-fill so unexecuted work fails loudly;
 reading is accepted only alongside proof the detector fires; per-event
 yield-site logging so collision geometry is measured, not assumed;
 anomaly counters for incomplete observation sets (zero anomalies in
-every reported cell). Hard gate enforcement: a run aborts on any gate
-failure (fault~15: an sm\_86 binary on the sm\_80 part failed every
-launch while completion markers printed green; markers are not gates).
+every reported cell). Hard gate enforcement: a run aborts on any gate failure; completion
+markers are not gates.
 
 \paragraph{Environment and clock discipline.} Four rented instances:
 three A10s (GA102, 72~SMs, locks at 1200\,MHz) and one A100-SXM4-40GB
@@ -316,9 +313,7 @@ nominally accepted higher locks; one A10 part sags to 1035\,MHz at its
 cap under peak load (a per-part leakage difference), bounded by a
 sag-proof replay to a ${\le}10\%$ effect inside the documented
 cross-build band. Occupancy is a compile-time contract
-(\texttt{launch\_bounds} pins 4 blocks/SM; a register-allocation drift
-once silently reduced it and orphaned 72 of 288 blocks---caught by the
-anomaly counter). Warmups discarded; every summary table in this paper
+(\texttt{launch\_bounds} pins 4 blocks/SM). Warmups discarded; every summary table in this paper
 is generated from committed CSVs by committed scripts.
 
 \paragraph{Exclusions, with cause.} The 72-block overhead cell on
@@ -356,7 +351,9 @@ at co-residency read ${\le}1\%$ (the poll's L2 read hides under
 co-resident warps). The atomic-flag build reads ${\sim}3\%$ at solo
 occupancy because its \emph{poll-free baseline} got 16 instructions
 faster---overhead here is a whole-kernel property, which is why we
-define it that way. Registered falsifier: 10\%. N1 holds on cost.
+define it that way. The registered ${\le}10\%$ threshold is met; N1's registered phrase
+``cost comparable to Hopper'' is not reasserted, since the metrics
+differ.
 
 \textbf{Latency.} Median 54--69\us{} across builds of the same
 mechanism at 288-block saturation (reference build: 64.5\us{} p50,
@@ -392,35 +389,38 @@ finish.
 \begin{table}[t]
   \centering
   \caption{A10 surface at poll period 1, setter-excluded, atomic build
-  (generated from \texttt{results/summary/review2\_surface.csv}).
-  Epoch = first-observation delay p50, reported at instrument
-  resolution (quantum 1.024\us).}
+  (generated from \texttt{results/summary/review2\_surface.csv}).}
   \label{tab:surface}
-  \begin{tabular}{rrrrr}
+  \begin{tabular}{rrrr}
     \toprule
-    blocks & lat p50 (\us) & lat p99 (\us) & epoch (\us) & overhead \\
+    blocks & lat p50 (\us) & lat p99 (\us) & overhead \\
     \midrule
-    16  & 9.2  & 11.3 & ${\le}3.1$ & 3.0\% \\
-    36  & 10.2 & 11.3 & ${\le}1.1$ & 3.0\% \\
-    72  & 11.3 & 12.3 & ${\le}1.1$ & --- \\
-    144 & 16.4 & 18.4 & ${\le}1.1$ & 1.0\% \\
-    216 & 32.8 & 37.9 & ${\le}1.1$ & ${\approx}0$ \\
-    288 & 64.5 & 86.0 & ${\le}2.1$ & ${\approx}0$ \\
+    16  & 9.2  & 11.3 & 3.0\% \\
+    36  & 10.2 & 11.3 & 3.0\% \\
+    72  & 11.3 & 12.3 & --- \\
+    144 & 16.4 & 18.4 & 1.0\% \\
+    216 & 32.8 & 37.9 & ${\approx}0$ \\
+    288 & 64.5 & 86.0 & ${\approx}0$ \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Table~\ref{tab:surface} and Figure~\ref{fig:main}a: the epoch never exceeds three timer quanta at
-poll period~1 and does not grow with block count (at higher poll
-periods the first-observation statistic includes polling alignment by
-definition and reaches 6.1\us{} at $(16,8)$---scoped accordingly).
-A-N1 fails both of its registered tests. Latency at fixed period
+Table~\ref{tab:surface} and Figure~\ref{fig:main}a. First-observation
+delay---the registered epoch construct---never exceeds three timer
+quanta at poll period~1 in any cell of either build (1.02/2.05\us{}
+p50/p99 at 288 in the reference build, computed from the released
+matrices) and does not grow with block count; at higher poll periods
+the statistic includes polling alignment by definition. A-N1 fails
+both of its registered tests---a verdict under the registered
+construct, which Section~\ref{sec:visibility}'s corrected instrument
+supersedes and confirms at the floor. Latency at fixed period
 scales $1.90$--$2.25\times$ per period doubling at every block count,
-as a residual-wait model predicts, and grows $8.4\times$ from 16 to
-288 blocks entirely through the tile term: under 4-way co-residency,
+as a residual-wait model predicts, and is dominated by the
+checkpoint-residual term, growing $7.0\times$ from 16 to 288 blocks in
+the reference build: under 4-way co-residency,
 individual tile walls stretch from a 25.4\us{} throughput mean to a
 57.6\us{} p99 (measured directly), and even the fastest of $10^4$
-events waits ${\sim}50$\us.
+events waited 50\us.
 
 Two distribution-level facts sharpen this. Doubling the polling CTAs
 at constant occupancy (36${\to}$72 blocks) moves the observation
@@ -441,8 +441,8 @@ conservative envelope there. Sampled pairwise linear correlations over
 the opposite prediction---that SM-sharing would induce correlation and
 break the fit---and report its failure. Independence here is an
 approximation that survives held-out testing, not an established
-mechanism; within that scope, tail engineering reduces to first-order
-statistics over per-block marginals.
+mechanism; within that scope, the handoff tail is predictable from per-block
+marginal residual distributions.
 
 \subsection{Notification floor and loaded observation delay}
 \label{sec:visibility}
@@ -455,8 +455,8 @@ matched residency (4 blocks/SM, occupancy pinned): a \emph{floor}
 (blocks only poll) and a \emph{loaded} variant (known-length FMA
 cadence plus DRAM-resident streaming). We report the loaded variant as
 \emph{observation delay}: it measures a worker's time to reach and
-service the poll under load, including whatever stalls the worker; the
-registered name (``loaded visibility'') overstated isolation.
+service the poll under load, including whatever stalls the worker (registered as ``loaded
+visibility'').
 
 \textbf{Floor: below the instrument's resolution, in every event.}
 The observed across-block maximum delay was one timer quantum in every
@@ -477,12 +477,11 @@ saturation.} With the memory system saturated, the across-block
 maximum set-to-observation delay grows with occupancy: on the
 A10, 7--8\us{} through 144 blocks, 21.5\us{} at 216, 97.3\us{} at 288;
 on the A100, 6.1\us{} at 108 blocks, 158.7\us{} at 324, and
-3.78\,ms at 432---computed from the released observation matrices,
-which is how a log-scrape misattribution of this cell was caught
-(fault~16 in the run log): under full-occupancy DRAM streaming a
-straggling block can stall for milliseconds. We registered the
-prediction that $3\times$ bandwidth and a 40\,MB L2 would cap the A100
-tail at 25\us; it was falsified by two orders of magnitude. The safe
+3.78\,ms at 432, computed from the released observation matrices:
+under full-occupancy DRAM streaming the set-to-observation delay
+extends to milliseconds. We registered the prediction that the A100's greater bandwidth
+($2.6\times$) and 40\,MB L2 would cap its tail at 25\us; it was
+falsified by two orders of magnitude. The safe
 statement is the measured one: greater raw bandwidth and L2 capacity
 did not reduce the saturated tail under this experiment, and within
 each part the tail grows with memory-system occupancy at fixed
@@ -520,7 +519,8 @@ three sites in four (6{,}376 per $10^4$).
 \textbf{Result.} Zero corrupt urgent outputs in every configuration on
 both parts---stage and issue-adjacent, drained
 (\texttt{cp.async.wait\_all} before reuse) and naive (no wait)---
-across 46{,}376 verified buffer-conflict events in total, with the
+across 28{,}859 verified buffer-conflict events in total (both parts,
+both disciplines), with the
 poison control caught $10^4/10^4$ in every run and background output
 always float64-clean. Per $10^4$-event cell the one-sided 95\%
 rule-of-three bound is $3.0\times10^{-4}$. We state this at its true
@@ -544,7 +544,7 @@ payoff: 17.4/22.5\us{} p50/p99 at A10 saturation, 16.4/21.5\us{} on
 the A100---for 5.0\% and 2.5\% overhead respectively.
 
 \textbf{The hazard that did fire.} The only silent corruption in the
-study came from the check protocol itself, twice, in the same shape:
+study came from the check protocol itself:
 branch conditions taken on live shared values let a late-drifting warp
 resolve the yield branch differently from its block, splitting the
 block across two \texttt{\_\_syncthreads} sites. NVIDIA documents
@@ -556,10 +556,11 @@ plausible magnitudes, in roughly half of runs, detected only because
 the poison gate failed on a matrix it cannot reach. The fix is a
 barrier-protected snapshot ($P{<}10^{-6}$ under the prior failure rate
 after 21/21 clean runs). This \emph{is} the intra-CTA half of
-ExpertPlex's warning manifested below Hopper; in the two incidents we
-observed it produced silent corruption rather than a hang. The safety contract that
-emerges: snapshot-then-branch under barrier protection, quiesce
-CTA-local async state before reuse, and prove the detector fires.
+ExpertPlex's warning manifested below Hopper; in every observed
+incident it produced silent corruption rather than a hang. The runtime contract that emerges: a uniform, barrier-protected
+handoff decision, and established completion of CTA-local asynchronous
+state before reuse. The evaluation contract, separately: a positive
+control proving the corruption detector is live.
 
 \subsection{Reserved capacity versus cooperative handoff}
 \label{sec:pareto}
@@ -629,8 +630,8 @@ notification floor (one quantum, flat to 432), boundary handoff
 55.3/64.5\us{} and stage handoff 16.4/21.5\us{} at saturation, the
 full safety signature, and the Pareto ordering. Falsified, both
 informatively: the loaded observation-delay tail and the co-residency
-wall
-stretch did not improve on $3\times$ bandwidth and $6.7\times$ L2
+wall stretch did not improve on $2.6\times$ bandwidth and $6.7\times$
+L2
 (Sections~\ref{sec:visibility},~\ref{sec:surface} report both parts).
 The decomposition---floor notification below instrument resolution,
 tile term dominant, hazard in control flow---reproduces on both
@@ -732,9 +733,9 @@ works on both measured Ampere parts without cluster hardware. Unloaded
 notification sits below the experiment's timing resolution, flat in
 worker count, on both architectures; measured handoff latency tracks
 the distribution of residual checkpoint work, predictable held-out
-from per-block marginals; the safety contract is CTA-local---
-quiesce async state, snapshot before branching, prove your detector
-fires---and the coordination obligations split cleanly: the cross-CTA
+from per-block marginals; the runtime safety contract is CTA-local---a uniform handoff
+decision, completion established before reuse---and the coordination
+obligations split cleanly: the cross-CTA
 phase-coherence obligation has no counterpart when no
 handoff-sensitive dependency spans CTAs, while the intra-CTA
 obligation remains, and our control-divergence faults demonstrate it
@@ -749,13 +750,14 @@ The repository contains the code, the registered claim file and dated
 amendments (provenance: public GitHub history predating all
 measurement commits), summary data with the scripts that generate
 every table in this paper, the figure pipeline, and a dated run log
-including all fifteen faults with their detection mechanisms; raw
+including every recorded fault (seventeen at this writing) with its
+detection mechanism; raw
 per-event distributions accompany the artifact release. AI tools
 (Claude) assisted with code and documentation; the author directed,
 reviewed, and verified all work. No measured number comes from a
 model: every result is produced by the released instruments under the
-registered thresholds, and primary results were reproduced across four
-physical GPUs and two architectures.
+registered thresholds, and primary results were reproduced across four physical GPUs
+spanning two Ampere compute capabilities (sm\_80 and sm\_86).
 
 \begin{thebibliography}{12}
 

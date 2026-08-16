@@ -554,3 +554,53 @@ Test queue (two experiments, in order): exact scheduler oracle
 (execution counts, generation, claimant), then one CUTLASS-class
 pipelined kernel. Profiling and reservation-sweep stay parked as
 labeled unknowns.
+
+## 2026-08-15. Full claim audit of the paper draft; fault 17
+
+Every quantitative claim and near-claim in the draft was traced to its
+source: committed summary CSVs, retained observation matrices, run-log
+records validated against matrices, hardware specifications, or the
+externally verified literature facts. Results:
+
+Verified clean (spot list): the latency arc and all per-cell surface
+numbers (bin cross-checks summary exactly: 64.51/86.02); the held-out
+quantiles; the every-event floor claim (0 of 19,800 over one quantum);
+the site splits; the Pareto table; the resource-envelope arithmetic
+(65,536 - 3x64x256 = 16,384 < 79x256); the rule-of-three and binomial
+statistics; wall-stretch and drain cross-checks; all ExpertPlex,
+GPreempt, Hummingbird, LithOS quotes and numbers (audit-verified);
+the stream-priority documentation claim.
+
+Fault 17 (class: unreconstructable aggregate): the paper claimed
+"46,376 forced yields with verified buffer-conflict geometry." No
+committed computation produces that number; the correct total,
+computed from the mid-run CSVs (claimed events at colliding sites,
+drain + naive, both parts), is 28,859, with zero corruption. The
+figure was written into the v2 draft without a script behind it.
+Corrected everywhere; computation committed as
+scripts/audit_claims.py. Rule reinforced: any number in prose must be
+reproducible by a committed script over committed data.
+
+Also caught and fixed in the same audit: "twice" for the control-
+divergence failure (one fault, stochastic manifestation across runs);
+the surface table's epoch column mixed builds (column removed; the
+registered construct is reported in prose with the 288 reference
+values computed from the retained matrix: first-obs 1.02/2.05); the
+8.4x latency growth belonged to the volatile build while the table
+cites the reference build (7.0x; corrected and attributed); "3x
+bandwidth" was a spec error (A100-SXM4-40GB 1,555 vs A10 600 GB/s =
+2.6x; also caught independently by review 5); "thresholds verbatim"
+overstated (condensed; claim file is authority); "never edited"
+imprecise (registered sections unmodified; amendments append-only);
+stale fault counts.
+
+Data-retention note: the review2 per-cell CSVs were never pulled and
+box 3 is terminated; the committed summary and the 288-block matrix
+survive, and the matrix reproduces the summary exactly, which is what
+made the audit possible. Lesson: pull per-cell raws before releasing
+a box, not just summaries.
+
+Review-5 pass applied in the same commit: 2.6x, abstract split
+(handoff tails smaller on A100; adversarial test worse), registered-
+threshold wording for N1/A-N1, runtime-vs-evaluation contract split,
+sm_80-anchor terminology, SOTA removed, six audit-history cuts.
