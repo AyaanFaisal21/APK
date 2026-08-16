@@ -525,3 +525,32 @@ Open items carried in Threats: exact per-task execution/generation
 oracle (designed, needs one validation run), loaded-visibility
 mechanism isolation, small-R anomaly sweep. Tensor-core
 generalization stays behind all three.
+
+## 2026-08-15. Review 4 pass: clarity and correctness edits
+
+Editorial standard now explicit: a valid measured result stays; a
+limitation enters only if it changes what the result means; one
+decisive corrective experiment beats five what-ifs.
+
+Applied (22 edits, all verified): the central condition narrowed to
+handoff-SENSITIVE cross-CTA state (the old wording was literally false
+of our own system; the queue and flag are shared but
+handoff-insensitive by construction, and the paper now says so as a
+positive example); the loaded construct renamed to observation delay
+(it includes the worker's stalls; the registered name overstated
+isolation; numbers unchanged); "flat in urgent size" replaced with the
+measured sublinear scaling (16x work = 1.8x p50, 2.1x p99) in all
+three locations; the conclusion now splits the cross-CTA obligation
+(no counterpart here) from the intra-CTA obligation (remains, and our
+faults demonstrate it); the novelty sentence names the actual gap
+instead of re-litigating existence; abstract quantile wording matched
+to what 5.3 shows; figure float pinned and caption fixed.
+
+Not touched, per the same standard: the max-of-N section, all
+numerical results, the A100 anchor, the preregistration material.
+FlexSched queued for reading, not cited.
+
+Test queue (two experiments, in order): exact scheduler oracle
+(execution counts, generation, claimant), then one CUTLASS-class
+pipelined kernel. Profiling and reservation-sweep stay parked as
+labeled unknowns.

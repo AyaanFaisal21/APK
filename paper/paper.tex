@@ -34,15 +34,18 @@ observed across-CTA maximum notification delay was one timer quantum
 (1.024\us) in every one of 19{,}800 events across both parts, flat
 from 16 to 432 resident blocks (elapsed ${<}2$ quanta under the
 measured quantization model)---while under deliberately saturated
-memory traffic the notification tail alone reaches 97\us{} (A10) and
-3.8\,ms (A100); for the measured workload, notification is not the
-binding term; (2)~measured handoff latency is instead dominated by
+memory traffic a worker's set-to-observation delay reaches 97\us{}
+(A10) and 3.8\,ms (A100); for the measured workload, notification is
+not the
+binding term (the loaded number is an observation delay, not
+isolated propagation); (2)~measured handoff latency is instead
+dominated by
 completion of in-flight work: 54--69\us{} median across builds at tile
 granularity on the saturated A10 (64.5/86.0\us{} p50/p99 in the
 reference build), and its tail is predicted \emph{held-out} by an
-independence model over per-block residuals---exactly, at four
-quantiles, on the A100; conservatively (measured tails 20\% lighter
-than predicted) on the A10; (3)~checkpointing inside a
+independence model over per-block residuals---to timer resolution at
+p50, p90, p95, and p99 on the A100; conservatively (measured tails
+20\% lighter than predicted) on the A10; (3)~checkpointing inside a
 \texttt{cp.async} pipeline lowers measured handoff to 17.4/22.5\us{}
 on the A10 and 16.4/21.5\us{} on the A100---on the same silicon as the
 systems literature, from user space, on a stock driver---at
@@ -87,11 +90,11 @@ broadcasts through distributed shared memory, with an mbarrier handoff
 for later warps---and its safety argument warns that ``independent
 tile-boundary checks are unsafe because high-performance operations
 pipeline both warps and CTAs across tiles.'' ExpertPlex is silent about
-pre-Hopper hardware. Whether cooperative handoff below sm\_90 is
-unavailable or merely unmeasured is an empirical question; persistent
-kernels have been scheduled in-kernel since well before
-Hopper~\cite{coopkernels,mpk}, so we treat it as the latter and
-measure.
+pre-Hopper hardware, and in-kernel yield itself predates
+Hopper~\cite{coopkernels,mpk}. The open question is narrower: whether
+fine-grained priority handoff at natural tile and pipeline-stage
+checkpoints remains cheap and safe in a fully resident sm\_8x
+persistent kernel with asynchronous pipeline state. We measure.
 
 The narrowed question this paper answers: \emph{on a fully resident
 Ampere persistent kernel with an asynchronous
@@ -100,9 +103,10 @@ handoff cost, what governs its tail, and what synchronization contract
 does safety actually require?} The emerging abstraction, which our
 measurements support and Section~\ref{sec:discussion} states precisely,
 is a \emph{condition}: cluster-level coordination ceases to be
-necessary when CTAs share no live cross-CTA state at the handoff
-point; the binding problems become CTA-local pipeline quiescence and
-straggler control.
+necessary when no \emph{handoff-sensitive} dependency spans CTAs---no
+shared pipeline or synchronization state that requires a
+phase-coherent transition; the binding problems become CTA-local
+pipeline quiescence and straggler control.
 
 Contributions, each a measurement on registered constructs:
 \begin{enumerate}
@@ -125,7 +129,7 @@ Contributions, each a measurement on registered constructs:
   microbenchmark separate notification from residual work: at the
   unloaded floor, the observed across-block maximum was one timer
   quantum in every event, flat to 432 blocks on both parts; under
-  saturated memory traffic the notification tail grows with
+  saturated memory traffic the set-to-observation delay grows with
   memory-system occupancy and was \emph{larger} on the
   higher-bandwidth part (Section~\ref{sec:visibility}).
 \item \textbf{Straggler statistics, held out.} Handoff latency at
@@ -152,9 +156,10 @@ Contributions, each a measurement on registered constructs:
   but cliffs in
   $\lceil U/R \rceil$ waves and is denominated in resource envelopes,
   not slots---an unpinned urgent kernel at 79 registers received
-  nothing from 32 reserved slots. Cooperative handoff is flat in
-  urgent size (22.5${\to}$41\us{} p50 for $16{\times}$ the work) for
-  ${\sim}3$\% (Section~\ref{sec:pareto}).
+  nothing from 32 reserved slots. Cooperative completion grows
+  sublinearly in urgent size---$16\times$ the work costs $1.8\times$
+  at p50 (22.5${\to}$41\us)---for ${\sim}3$\%
+  (Section~\ref{sec:pareto}).
 \item \textbf{A cross-architecture anchor.} The decomposition
   transfers to sm\_80 (A100: stage handoff 16.4/21.5\us{} at 432-block
   saturation); two registered predictions about memory headroom were
@@ -190,8 +195,13 @@ Software coupling remains expressible---cooperative launch provides
 grid-wide barriers, and any persistent queue couples CTAs through
 global atomics---but the hardware-idiomatic cross-CTA pipelining that
 ExpertPlex's safety warning describes (TMA multicast feeding cluster
-peers) has no sm\_8x equivalent, and our workload has no cross-CTA
-live state at handoff points.
+peers) has no sm\_8x equivalent. Our workload shares plenty of
+cross-CTA state---the task queue, the generation flag, claim
+words---but all of it is handoff-\emph{insensitive}: device-scope
+atomics keep it consistent under any phase interleaving, so no CTA's
+transition can strand another. What it lacks is handoff-sensitive
+state, the kind a multicast peer or phase-coupled pipeline partner
+holds.
 \texttt{cp.async}, available from sm\_80, supplies the intra-CTA half
 of the hazard surface: asynchronous copies in flight into shared
 memory.
@@ -362,7 +372,7 @@ finish.
 \subsection{Scaling: straggler physics, not propagation}
 \label{sec:surface}
 
-\begin{figure}[t]
+\begin{figure}[!t]
   \centering
   \includegraphics[width=\linewidth]{figures/handoff.png}
   \caption{Generated from committed summary data by committed scripts.
@@ -373,9 +383,9 @@ finish.
   log scale; the floor sits on the timer quantum everywhere while the
   loaded tail grows with memory-system occupancy---and grows
   \emph{more} on the higher-bandwidth part. (c)~The reserved-capacity
-  Pareto: cooperative handoff (green) is flat in urgent size $U$;
-  reservation (purple) is cheap but cliffs when $U$ exceeds reserved
-  slots.}
+  Pareto: cooperative handoff (green) grows sublinearly in urgent size
+  $U$; reservation (purple) is cheap but cliffs when $U$ exceeds
+  reserved slots.}
   \label{fig:main}
 \end{figure}
 
@@ -434,7 +444,7 @@ approximation that survives held-out testing, not an established
 mechanism; within that scope, tail engineering reduces to first-order
 statistics over per-block marginals.
 
-\subsection{The notification tail, isolated}
+\subsection{Notification floor and loaded observation delay}
 \label{sec:visibility}
 
 The registered ``check epoch'' construct (first-observer delay) is
@@ -443,7 +453,10 @@ corrected instrument asks the right question---how long until
 \emph{every} block observes---with tile work removed. Two variants at
 matched residency (4 blocks/SM, occupancy pinned): a \emph{floor}
 (blocks only poll) and a \emph{loaded} variant (known-length FMA
-cadence plus DRAM-resident streaming).
+cadence plus DRAM-resident streaming). We report the loaded variant as
+\emph{observation delay}: it measures a worker's time to reach and
+service the poll under load, including whatever stalls the worker; the
+registered name (``loaded visibility'') overstated isolation.
 
 \textbf{Floor: below the instrument's resolution, in every event.}
 The observed across-block maximum delay was one timer quantum in every
@@ -454,13 +467,14 @@ quanta (2.05\us). What this measures is device-side dissemination
 from one CTA's relaxed-atomic store to hundreds of independently
 polling CTAs; it is not ExpertPlex's complete check epoch, whose
 hierarchy also enforces phase coherence among dependent warp and
-cluster actors. The precise statement: when CTAs have no cross-CTA
-live dependency, the cluster-coherence stage of that protocol has no
+cluster actors. The precise statement: when no handoff-sensitive dependency spans
+CTAs, the cluster-coherence stage of that protocol has no
 corresponding synchronization obligation, and device-side notification
 among independent CTAs is inexpensive in the unloaded microbenchmark.
 
-\textbf{Loaded: congestion, and it is architectural.} With the memory
-system saturated, the across-block max grows with occupancy: on the
+\textbf{Loaded observation delay: millisecond tails under memory
+saturation.} With the memory system saturated, the across-block
+maximum set-to-observation delay grows with occupancy: on the
 A10, 7--8\us{} through 144 blocks, 21.5\us{} at 216, 97.3\us{} at 288;
 on the A100, 6.1\us{} at 108 blocks, 158.7\us{} at 324, and
 3.78\,ms at 432---computed from the released observation matrices,
@@ -487,7 +501,8 @@ divergence} at two levels: warps within a CTA (a TMA warp loading tile
 $k{+}1$ while math warps consume tile $k$; one warp switching phases
 can strand another at an old-phase barrier) and CTAs within a cluster
 (TMA-multicast peers must switch together). The cluster level has no
-sm\_8x analog in a workload without cross-CTA state. The intra-CTA
+sm\_8x analog in a workload without handoff-sensitive cross-CTA
+state. The intra-CTA
 level is real, and we hit it (below). A third hazard---data races
 against in-flight \texttt{cp.async} groups when shared memory is
 reused at a yield---is the one our experiment forces.
@@ -519,7 +534,7 @@ program that happened not to manifest, and wall-clock intuition is not
 a synchronization contract. The timing account---claim-path latency
 (barriers plus CAS, ${\ge}1$--2\us) exceeding L2-resident copy
 completion (${\ll}1$\us)---explains only why no failure manifested; it
-sanctions nothing. A DRAM-pressured variant (the loaded-visibility
+sanctions nothing. A DRAM-pressured variant (the loaded observation-delay
 result shows congestion can stretch memory operations by orders of
 magnitude) is the identified lever for making the undefined variant
 fail. The drain discipline costs nothing measurable here---
@@ -592,7 +607,8 @@ or a larger footprint than the persistent worker supports gains
 nothing from either mechanism without redesign. \emph{The tradeoff is real, with one
 anomaly flagged:} reservation's throughput cost is at most $1.5\%$
 even at $R{=}32$, so it wins throughput while cooperative handoff wins
-latency by $3$--$5\times$ at p99 and is flat in urgent size. The
+latency by $3$--$5\times$ at p99 and grows sublinearly in urgent size
+($16\times$ the tiles: $1.8\times$ at p50, $2.1\times$ at p99). The
 apparently \emph{negative} cost at small $R$ on this A10 is not
 claimed as a result: the part in question sags below its clock lock at
 peak power (its 288-block drain is 12\% slower than a healthier
@@ -612,7 +628,8 @@ predictions registered first. Confirmed: occupancy shape, the
 notification floor (one quantum, flat to 432), boundary handoff
 55.3/64.5\us{} and stage handoff 16.4/21.5\us{} at saturation, the
 full safety signature, and the Pareto ordering. Falsified, both
-informatively: the loaded-visibility tail and the co-residency wall
+informatively: the loaded observation-delay tail and the co-residency
+wall
 stretch did not improve on $3\times$ bandwidth and $6.7\times$ L2
 (Sections~\ref{sec:visibility},~\ref{sec:surface} report both parts).
 The decomposition---floor notification below instrument resolution,
@@ -622,16 +639,17 @@ measured Ampere parts; the constants are per-part.
 \section{Discussion}
 \label{sec:discussion}
 
-\paragraph{The condition, stated precisely.} For persistent workloads
-whose CTAs hold no live cross-CTA state at handoff points,
-cluster-level coordination is not required for fine-grained cooperative
-handoff: a device-scope relaxed atomic plus CTA-local quiescence
+\paragraph{The condition, stated precisely.} For persistent
+workloads in which no handoff-sensitive dependency spans CTAs---no
+shared pipeline or synchronization state requiring a phase-coherent
+transition---cluster-level coordination is not required for
+fine-grained cooperative handoff: a device-scope relaxed atomic plus CTA-local quiescence
 suffices, and the dominant tail term is the maximum residual
 checkpoint interval across resident workers---not control-signal
 propagation, which in the unloaded floor sits below the experiment's
 timing resolution on both measured parts (and which saturated memory
 traffic can inflate; Section~\ref{sec:visibility}). The necessary
-coordination scope follows the dependency scope. This does not diminish Hopper's machinery; it identifies its
+coordination scope follows the handoff-sensitive dependency scope. This does not diminish Hopper's machinery; it identifies its
 scope. ExpertPlex's hierarchy exists to keep TMA-multicast cluster
 peers phase-coherent; remove that topology and the hierarchy has
 nothing left to coordinate, while the problems that remain---straggler
@@ -674,8 +692,8 @@ numerical plus omission-detecting (NaN prefill), and because tile
 writes are idempotent it cannot see duplicate execution, stale
 generations, or wrong ownership---exact per-task execution counters
 and generation checks are designed but not yet run; the
-loaded-visibility mechanism is unisolated (no load sweep or profiler
-counters yet); and the small-$R$ negative reservation cost is an
+loaded observation-delay mechanism is unisolated (no load sweep or
+profiler counters yet); and the small-$R$ negative reservation cost is an
 unresolved anomaly confounded with per-part clock sag.
 
 \section{Related work}
@@ -716,8 +734,11 @@ worker count, on both architectures; measured handoff latency tracks
 the distribution of residual checkpoint work, predictable held-out
 from per-block marginals; the safety contract is CTA-local---
 quiesce async state, snapshot before branching, prove your detector
-fires---and the hazard Hopper's hierarchy exists to prevent has no
-object when CTAs share no live state. Straggler tails are the price,
+fires---and the coordination obligations split cleanly: the cross-CTA
+phase-coherence obligation has no counterpart when no
+handoff-sensitive dependency spans CTAs, while the intra-CTA
+obligation remains, and our control-divergence faults demonstrate it
+directly. Straggler tails are the price,
 and on these parts buying bandwidth did not pay them. For
 the persistent kernels that already run below Hopper, the scheduler
 inside is not waiting on hardware; it is waiting on its slowest tile.

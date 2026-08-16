@@ -63,6 +63,9 @@ arXiv 2601.04071. Jan 2026.
 - Cooperative Kernels (FSE 2017): cited from secondary sources. PDF not
   yet obtained.
 - Aegaeon, MuxServe figures: from a secondary review. Not checked.
+- FlexSched: runtime CTA allocation among co-executing kernels with
+  different priorities. Named in review 4 as a possible taxonomy
+  neighbor. Read before any citation or novelty claim.
 
 ## The landscape in one paragraph
 
