@@ -1,0 +1,35 @@
+measurement,arm,k,value,unit,notes
+calibrate,off,128,10.90,us_per_tile,1050MHz A10 box5; 27.7 TFLOP/s
+calibrate,off,256,17.32,us_per_tile,34.9 TFLOP/s
+calibrate,off,512,30.21,us_per_tile,40.0 TFLOP/s
+overhead_p50,pe_drain,128,2.80,percent,ABBA 20 reps 100k tasks
+overhead_p50,pe_drain,256,3.04,percent,
+overhead_p50,pe_drain,512,3.40,percent,
+overhead_p50,stage_drain,128,13.95,percent,crosses registered 10% stake
+overhead_p50,stage_drain,256,13.72,percent,
+overhead_p50,stage_drain,512,14.73,percent,
+overhead_p50,issue_drain,128,13.96,percent,
+overhead_p50,issue_drain,256,14.79,percent,
+overhead_p50,issue_drain,512,16.46,percent,
+overhead_p50,stage_drain_syncflag,256,41.10,percent,pre-pipelining flag read; mechanism decomposition
+overhead_p50,stage_drain_hoistonly,256,41.76,percent,initial synchronous implementation
+latency_p50,stage_drain,256,9.22,us,set->last of 72 blocks; 10k events; 0 anomalies
+latency_p99,stage_drain,256,10.24,us,
+latency_p50,issue_naive,256,8.19,us,
+latency_p99,issue_naive,256,9.22,us,
+latency_p50,pe_drain,256,35.84,us,per-tile sites
+latency_p99,pe_drain,256,37.89,us,
+e2e_p50,stage_drain,256,44.03,us,set->urgent tile complete
+e2e_p99,stage_drain,256,48.13,us,
+e2e_p50,pe_drain,256,62.46,us,
+safety_corrupt,stage_drain,256,0,count_of_10000,device check vs f64-derived ref; bg C f64 PASS
+safety_corrupt,issue_naive,256,0,count_of_10000,stage-0 copy groups un-awaited at dominant claim sites
+safety_corrupt,stage_poison,256,10000,count_of_10000,detector control fully live
+oracle_dup,stage_drain,256,0,count_of_14328838,exactly-once; 10000 urgent exactly-once
+oracle_dup,issue_naive,256,0,count_of_14290145,exactly-once; 10000 urgent exactly-once
+sass_instructions,off,,432,count,guard baseline
+sass_instructions,pe_drain,,1312,count,
+sass_instructions,stage_drain,,1376,count,stage_naive 1368 stage_poison 1376 issue 1368
+registers,off,,120,per_thread,all arms 1 block/SM (smem 56832B)
+registers,pe_drain,,128,per_thread,
+registers,stage_issue,,220,per_thread,oracle variants 222

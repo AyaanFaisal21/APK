@@ -732,3 +732,65 @@ Predictions, before any run:
 Falsifiable stake: if overhead or latency degrade qualitatively (>10%
 overhead, or latency >> one tile), the synthetic-kernel conclusion
 does not generalize and the paper reports where it breaks.
+
+## 2026-08-15. Tensor-core generalization: results
+
+Box 5 (A10, 1050 MHz sag part, lock verified under load). All gates
+before any number: float64 C check PASS (max rel 9.7e-06 at K = 256),
+urgent device check vs f64-derived reference PASS, poison 100%,
+memcheck 0 errors, racecheck 0 hazards, LOCAL = 0 on every variant
+(failure-watch (b): no spill cliff). Occupancy landed exactly as
+predicted: 1 block/SM from 56,832 B smem, sat = 72.
+
+Predictions vs results:
+- Tile time: 10.9 / 17.3 / 30.2 us at K = 128 / 256 / 512 (40 TFLOP/s
+  at K = 512). K >= 256 inside the 15-40 us band; K = 128 under it.
+- Boundary-poll overhead: 2.8-3.4%. Predicted <= 1.5%. Missed 2x low.
+- Stage-poll overhead: 13.7-14.7% (issue 14.0-16.5%). Predicted <= 4%.
+  FALSIFIED, and it crossed the registered 10% stake. This is the
+  finding of the phase: per-site cost is occupancy-dependent. At
+  1 block/SM there are no co-resident warps to hide checkpoint cost.
+  Decomposition, all measured: a synchronous flag read at the site
+  costs the full ~0.87 us L2 round trip per site (42% drain overhead);
+  software-pipelining the read (load one chunk ahead, publish next
+  chunk) removes it; the residual ~0.24 us/site is the extra
+  block-wide barrier + uniform-decision machinery, which nothing at
+  1 block/SM can hide. The SGEMM instruments never saw this because
+  co-resident blocks absorbed the stalls. The stake fires against
+  stage-granular polling only: boundary-granular handoff generalizes.
+- Latency (10k events, 0 unset / 0 unclaimed / 0 anomalies, all 72
+  blocks observed every event): first observer p50 2.05 us (the
+  per-stage scale, as predicted); whole-grid set->last p50 9.22 us,
+  p99 10.24 (stage); 8.19 / 9.22 (issue); 35.84 / 37.89 (boundary,
+  = tile + one-sample staleness, 2.07x tile p50 vs predicted 1.5x -
+  the pipelined flag adds one full tile of staleness at this site
+  density). Urgent e2e p50 44.0 us (stage), 62.5 us (boundary).
+- Safety: drain 0/10,000 corrupt; NAIVE 0/10,000 - mid-pipeline yield
+  with un-awaited stage-0 copy groups in flight stays data-safe on
+  sm_86 in the tensor-core pipeline too; poison 10,000/10,000.
+- Oracle: PASS both arms. 14,328,838 and 14,290,145 tasks
+  exactly-once, 10,000 urgent exactly-once each, zero violations.
+
+Disclosures:
+- The measured trade is now explicit: detection p50 9.2 us at 14%
+  drain cost (per-stage) vs 35.8 us at 3% (per-tile), same safety.
+- Claim sites are phase-clustered (site 6 takes 79% of stage-arm
+  claims): blocks stay phase-correlated across tiles, so sites are
+  not uniform samplers. The dominant naive-arm sites (0, 6) are ones
+  with stage-0 copy traffic in flight, so the hazard window was
+  exercised thousands of times.
+- Setter block is over-represented as last observer (4-9% vs 1.4%
+  uniform); setter-excluded p50 is identical (failure-watch (d)).
+- Off-arm drain spreads are tight (no fault-6 bimodality at grid=72;
+  one -0.5% outlier rep in one cell).
+- Stage/issue variants sit at 220 registers vs 120 (off) and 128
+  (boundary); oracle 222. All within the 256-reg 1 block/SM envelope,
+  so comparisons share one residency. SASS guard values pinned in
+  results/summary/tc_summary.csv.
+- Two instrument iterations before the final numbers, both above:
+  the synchronous flag read (a measurement of a bad implementation,
+  kept as the decomposition), and a missing issue+drain instantiation
+  found by the overhead runner (clean crash, no number produced).
+
+Raw: results/raw/tc/ (6 CSVs, checksum-gated off box 5).
+Summary: results/summary/tc_summary.csv.

@@ -85,7 +85,7 @@ __device__ __forceinline__ void cp_wait1() {
   asm volatile("cp.async.wait_group 1;\n" ::);
 }
 
-enum PollMode { POLL_OFF = 0, POLL_STAGE = 2, POLL_ISSUE = 3 };
+enum PollMode { POLL_OFF = 0, POLL_PE = 1, POLL_STAGE = 2, POLL_ISSUE = 3 };
 enum Discipline { DISC_DRAIN = 0, DISC_NAIVE = 1, DISC_POISON = 2 };
 
 template <int POLLMODE, int DISC, bool ORACLE = false>
@@ -254,10 +254,21 @@ __global__ void __launch_bounds__(THREADS) persistent_tc(
     return true;
   };
 
+  // tid0 only: flag value in flight. Every publish of rFlagPend into
+  // s_flag is separated from its load by at least a task fetch or a
+  // full pipeline chunk, so the ~0.87 us L2 round trip never lands on
+  // the critical path (a synchronous read here measured 42% drain
+  // overhead: at 1 block/SM no co-resident warps cover the stall).
+  // Cost: detection sees the flag one sample late; the events arm
+  // measures that delay end to end.
+  int rFlagPend = 0;
   while (true) {
     if (threadIdx.x == 0) {
       s_task = atomicAdd(nextTask, 1u);
-      if (POLLMODE != POLL_OFF) s_flag = flag_load(flag);
+      if (POLLMODE != POLL_OFF) {
+        s_flag = rFlagPend;
+        rFlagPend = flag_load(flag);
+      }
     }
     __syncthreads();
     const unsigned task = s_task;
@@ -267,6 +278,8 @@ __global__ void __launch_bounds__(THREADS) persistent_tc(
     const int tile = (int)(task % (unsigned)totalTiles);
     const int rowBase = (tile / tilesN) * BM;
     const int colBase = (tile % tilesN) * BN;
+
+    if (POLLMODE == POLL_PE) checkpoint(-1, false);  // boundary site
 
     bool redo = true;
     while (redo) {
@@ -284,8 +297,13 @@ __global__ void __launch_bounds__(THREADS) persistent_tc(
         if (c + 2 < nChunks)
           issue_chunk((c + 2) % STAGES, (c + 2) * BKT, rowBase, colBase);
 
+        if ((POLLMODE == POLL_STAGE || POLLMODE == POLL_ISSUE) &&
+            threadIdx.x == 0) {
+          s_flag = rFlagPend;
+          rFlagPend = flag_load(flag);
+        }
+
         if (POLLMODE == POLL_ISSUE) {
-          if (threadIdx.x == 0) s_flag = flag_load(flag);
           __syncthreads();
           // Window-forced: before any wait, up to two copy groups are
           // outstanding, targeting stages (c+1)%3 and (c+2)%3 --
@@ -312,8 +330,6 @@ __global__ void __launch_bounds__(THREADS) persistent_tc(
         }
 
         if (POLLMODE == POLL_STAGE) {
-          if (threadIdx.x == 0) s_flag = flag_load(flag);
-          __syncthreads();
           if (checkpoint(c, c + 1 < nChunks)) {
             redo = true;
             break;
@@ -392,6 +408,7 @@ int main(int argc, char** argv) {
                     : disc == "poison" ? DISC_POISON
                                        : -1;
   const int pollI = poll == "off"     ? POLL_OFF
+                    : poll == "pe"    ? POLL_PE
                     : poll == "stage" ? POLL_STAGE
                     : poll == "issue" ? POLL_ISSUE
                                       : -1;
@@ -414,6 +431,8 @@ int main(int argc, char** argv) {
   allow((const void*)persistent_tc<POLL_STAGE, DISC_NAIVE>);
   allow((const void*)persistent_tc<POLL_STAGE, DISC_POISON>);
   allow((const void*)persistent_tc<POLL_ISSUE, DISC_NAIVE>);
+  allow((const void*)persistent_tc<POLL_ISSUE, DISC_DRAIN>);
+  allow((const void*)persistent_tc<POLL_PE, DISC_DRAIN>);
   allow((const void*)persistent_tc<POLL_STAGE, DISC_DRAIN, true>);
   allow((const void*)persistent_tc<POLL_ISSUE, DISC_NAIVE, true>);
 
@@ -524,6 +543,10 @@ int main(int argc, char** argv) {
       args(persistent_tc<POLL_STAGE, DISC_POISON>);
     else if (pm == POLL_ISSUE && dc == DISC_NAIVE)
       args(persistent_tc<POLL_ISSUE, DISC_NAIVE>);
+    else if (pm == POLL_ISSUE && dc == DISC_DRAIN)
+      args(persistent_tc<POLL_ISSUE, DISC_DRAIN>);
+    else if (pm == POLL_PE && dc == DISC_DRAIN)
+      args(persistent_tc<POLL_PE, DISC_DRAIN>);
     else {
       fprintf(stderr, "unsupported poll/discipline combination\n");
       exit(1);
