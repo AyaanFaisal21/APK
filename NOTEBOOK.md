@@ -381,3 +381,49 @@ A1, A2, A3, and the A-flag rerun are now all answered. The measurement
 set for the revised paper is complete.
 
 **Next:** the paper rewrite on corrected constructs.
+
+## 2026-08-15. Environmental audit of the review-2 and A3 batches
+
+Checked on the box that produced them: ECC volatile counts zero, no Xid
+or driver errors since boot, no other compute processes, host idle
+(load 0.08, memory and disk free), temperature 41 to 49 C throughout.
+
+Observation 14, the one real finding: this A10 is a leakier part than
+box 1. The 1200 MHz lock sags to 1035-1080 MHz at the 150 W cap under
+peak load (SwPowerCap bit active); box 1 held 1200 at ~130 W. The
+under-load read-back was not repeated on this box before its batches:
+a protocol lapse, caught by this audit. Bound measured directly: a
+sag-proof 1050 MHz lock reproduces the 288-block cell at p50 70.7 us
+versus 68.6 (mixed clock) versus 64.5 (recorded); the entire clock
+regime shifts timing numbers by at most ~10%, inside the documented
+cross-build band. No verdict has less than 3x margin. Rule amended in
+practice: the under-load read-back is per-BOX, not per-project.
+
+## 2026-08-15. A100 anchor (A4): plan and predictions, filed before any run
+
+Purpose, ranked: (1) literature comparability. GPreempt, Hummingbird,
+LithOS, and MPK all report on A100; one run puts in-kernel handoff on
+the same part, from user space, on a stock driver. (2) External
+validity: sm_80 GA100 and sm_86 GA102 bracket the Ampere family; if
+the decomposition holds on both, "Ampere-class" is earned. (3) The L2
+regime probe: A100's 40 MB L2 holds this workload's entire footprint;
+GA102's 6 MB did not.
+
+Predictions:
+- Occupancy register-bound at 4 blocks/SM; saturation = 432 blocks.
+- Timer quantum: measure first; assumed 1.024 us until shown otherwise.
+- Floor visibility Dmax <= 2 quanta, flat to 432 blocks.
+- Co-residency wall stretch SMALLER than GA102's 2.3x (predict p99
+  wall <= 1.6x the throughput mean) on L2 and bandwidth headroom.
+- Boundary yield p50 at saturation 45 to 75 us; stage 15 to 25 us.
+- Loaded visibility Dmax at saturation <= 25 us (vs 97 on the A10).
+  If it explodes anyway, congestion tails are architectural rather
+  than bandwidth-bound. Falsifiable either way.
+- Safety: naive 0 corrupt (stronger L2 regime), poison 100%.
+- Overhead <= 3% in every cell.
+- Constants are reported per part and never blended with GA102 numbers.
+
+Budget: ~2 hours on gpu_1x_a100_sxm4. Order: lock hunt with under-load
+read-back FIRST (observation 14), quantum measurement, occupancy check,
+then calibration, surface subset (4 block counts), visibility, safety
+trio, Pareto spot, slack.
