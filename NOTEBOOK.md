@@ -243,3 +243,66 @@ Predictions, filed before the window-forcing runs:
 - stage + naive rerun with site logging: still 0 corrupt; ~2,500
   events at the one colliding site (c=1), reported precisely per B7.
 - Surface and visibility predictions filed 2026-08-08 stand unchanged.
+
+## 2026-08-15. Review-2 batch: results (third A10, us-west)
+
+Ops note first: three stacked faults blocked the new box (instance key
+provisioning failed; browser pastes corrupted authorized_keys until a
+tr-cleaned rewrite; this Mac's ssh-agent was empty after a reboot, so
+the client aborted after the server had accepted the key). Verbose sshd
+logging localized it. Fault 12: an agent-empty client failure reads
+identically to a server rejection from the client side.
+
+All gates clean: 4x sanitizer 0 errors, all verifies pass, poison
+verify gate trips as required, 0 anomalies in every run.
+
+**A-flag verdict (atomic vs volatile):** hot poll kernel SASS is
+instruction-identical (4400 = 4400); every poll-1 latency cell
+reproduces within 1 quantum on a third physical A10. Large-period
+cells differ 2.7 to 3.3% (run variance at 100s of us; the 1-quantum
+prediction was mis-specified for those scales). Overhead at solo
+occupancy reads ~3.0% (was ~0.9%) because the poll-OFF baseline got
+16 instructions FASTER in the atomic build; the audit's whole-kernel
+overhead framing is vindicated. Worst cell 3.02%, falsifier 10% intact.
+The 72-block cell is sane on this box (+1.3%, no bistability observed).
+
+**A1 verdict (notification tail):**
+
+| blocks | floor Dmax p50/p99 | loaded cadence | loaded Dmax p50/p99 |
+|---|---|---|---|
+| 16-144 | 1.02 / 1.02 us | 7.0-7.5 us | 7.2-8.2 / 8.2-9.2 us |
+| 216 | 1.02 / 1.02 | 8.5 | 21.5 / 23.6 |
+| 288 | 1.02 / 1.02 | ~9-10 | 97.3 / 110.6 |
+
+Floor: device-scope notification reaches all 288 independently polling
+CTAs within ONE timer quantum, flat at every count. A1's floor
+criterion holds maximally: propagation is free on sm_86.
+Loaded: the registered growth trigger FIRED (97 us at 288). The tail
+is congestion physics on the polling path, not propagation (the floor
+proves that); the DRAM-streaming microbench is harsher than the real
+tile workload, which sits at 64.5 us at the same count. The two
+variants bracket the real kernel. Own section in the paper.
+
+**A2 verdict (window-forced safety):** issue-adjacent naive with
+buffer-0 groups outstanding at the yield: **6,376 true-collision
+events, 0 corrupt** (sites 0-2 of the 10,000; site split 18/22/24/36%,
+stage mode uniform 26/26/24/23%). Poison: 10,000/10,000. The
+drain-causality claim CANNOT be made at this geometry: the registered
+zero branch is taken. Mechanism reading: the claim path (two barriers +
+CAS, >= 1-2 us) exceeds L2-hit cp.async completion (~0.3 us), so
+copies land before the urgent tile's first store; the hazard window is
+unreachable when sources are L2-resident. The documented lever if
+pursued: DRAM-pressured copies (the loaded-visibility result proves
+congestion stretches memory operations ~10x). Drain remains free
+insurance: SASS-identical, latency-identical (17.4 us p50 both).
+
+**iid prediction WRONG, in the strong direction:** the pooled-F^N
+order-statistics model predicts Dmax p50 66.6 us at 288 blocks;
+empirical is 64.5 (3%). Cross-block delay correlations are ~0
+(same-SM-candidate pair -0.001, neighbor pair +0.020). Straggler
+tails at saturation are quantitatively predicted by independent draws;
+the predicted SM-level correlation does not exist at measurable size.
+
+**Next:** reserved-capacity Pareto (A3), then the paper rewrite on the
+corrected constructs. All summary tables now generate from committed
+CSVs by script (scripts/analyze_review2.py).
