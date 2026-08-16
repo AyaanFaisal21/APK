@@ -302,7 +302,10 @@ checks on every output; NaN pre-fill so unexecuted work fails loudly;
 reading is accepted only alongside proof the detector fires; per-event
 yield-site logging so collision geometry is measured, not assumed;
 anomaly counters for incomplete observation sets (zero anomalies in
-every reported cell). Hard gate enforcement: a run aborts on any gate failure; completion
+every reported cell); and exact scheduler invariants---per-task
+execution counts, per-event urgent-completion counts, claimant
+identity---closing the blind spot idempotent tile writes leave in any
+numerical check. Hard gate enforcement: a run aborts on any gate failure; completion
 markers are not gates.
 
 \paragraph{Environment and clock discipline.} Four rented instances:
@@ -695,14 +698,10 @@ Cross-build latency at saturation spans 54--69\us{} and one A10 part's
 clock sag bounds a further ${\le}10\%$; margins on every verdict
 exceed these bands by $3$--$30\times$. Host-side effects touch only
 the reserved-arm e2e (ms scale) and the deprecated host-set
-instrument. Three further gaps are open: the correctness oracle is
-numerical plus omission-detecting (NaN prefill), and because tile
-writes are idempotent it cannot see duplicate execution, stale
-generations, or wrong ownership---exact per-task execution counters
-and generation checks are designed but not yet run; the
-loaded observation-delay mechanism is unisolated (no load sweep or
-profiler counters yet); and the small-$R$ negative reservation cost is an
-unresolved anomaly confounded with per-part clock sag.
+instrument. Two further gaps are open: the loaded observation-delay
+mechanism is unisolated (no load sweep or profiler counters yet), and
+the small-$R$ negative reservation cost is an unresolved anomaly
+confounded with per-part clock sag.
 
 \section{Related work}
 
