@@ -88,14 +88,20 @@ __global__ void __launch_bounds__(THREADS) persistent_bg(
     *bgEndGT = globaltimer_ns();
 }
 
+// A3 reserved arm: the urgent job is U blocks, block b computing tile b —
+// distinct real work per block, written compactly per block. uEndGT is an
+// atomicMax so it holds the LAST block's completion (job-level e2e).
 __global__ void __launch_bounds__(THREADS) urgent_tile(
     const float* __restrict__ A, const float* __restrict__ B,
-    float* __restrict__ Cu, int K, int N, long long* uStartGT,
-    long long* uEndGT) {
-  if (threadIdx.x == 0) *uStartGT = globaltimer_ns();
-  tile_gemm(A, B, Cu, K, N, 0, 0, TN, 0, 0);
+    float* __restrict__ Cu, int K, int N, int tilesN, long long* uStartGT,
+    unsigned long long* uEndGT) {
+  if (blockIdx.x == 0 && threadIdx.x == 0) *uStartGT = globaltimer_ns();
+  const int t = (int)blockIdx.x;
+  tile_gemm(A, B, Cu + (size_t)t * TM * TN, K, N, (t / tilesN) * TM,
+            (t % tilesN) * TN, TN, 0, 0);
   __syncthreads();
-  if (threadIdx.x == 0) *uEndGT = globaltimer_ns();
+  if (threadIdx.x == 0)
+    atomicMax(uEndGT, (unsigned long long)globaltimer_ns());
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +142,8 @@ int main(int argc, char** argv) {
   const int trials = (int)parse_arg(argc, argv, "--trials", 500);
   const std::string mode = parse_str(argc, argv, "--mode", "sat");
   int blocks = (int)parse_arg(argc, argv, "--blocks", 0);
+  const int reserve = (int)parse_arg(argc, argv, "--reserve", -1);
+  const int urgentBlocks = (int)parse_arg(argc, argv, "--urgent-blocks", 1);
   const char* csvPath = parse_str(argc, argv, "--csv", "");
 
   if (K % KB != 0) {
@@ -152,7 +160,8 @@ int main(int argc, char** argv) {
       &maxPerSM, persistent_bg, THREADS, 0));
 
   if (blocks <= 0) {
-    if (mode == "sat") blocks = sms * maxPerSM;
+    if (reserve >= 0) blocks = sms * maxPerSM - reserve;
+    else if (mode == "sat") blocks = sms * maxPerSM;
     else if (mode == "sat-1") blocks = sms * maxPerSM - 1;
     else if (mode == "1persm") blocks = sms;
     else { fprintf(stderr, "unknown --mode %s\n", mode.c_str()); return 1; }
@@ -164,8 +173,9 @@ int main(int argc, char** argv) {
 
   printf("GPU: %s | %d SMs | %d resident blocks/SM max -> %d slots\n",
          prop.name, sms, maxPerSM, sms * maxPerSM);
-  printf("mode=%s: %d blocks | K=%d | bg-tasks=%d | trials=%d\n",
-         mode.c_str(), blocks, K, bgTasks, trials);
+  printf("mode=%s: %d blocks | reserve=%d urgent-blocks=%d | K=%d | "
+         "bg-tasks=%d | trials=%d\n",
+         mode.c_str(), blocks, reserve, urgentBlocks, K, bgTasks, trials);
 
   srand(21);
   std::vector<float> hA((size_t)M * K), hB((size_t)K * N);
@@ -179,7 +189,8 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMalloc(&dA, hA.size() * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&dB, hB.size() * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&dC, (size_t)M * N * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&dCu, (size_t)TM * TN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&dCu,
+                        (size_t)urgentBlocks * TM * TN * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&dNext, sizeof(unsigned int)));
   CUDA_CHECK(cudaMalloc(&dExited, sizeof(int)));
   CUDA_CHECK(cudaMalloc(&dBgStart, sizeof(long long)));
@@ -225,22 +236,27 @@ int main(int argc, char** argv) {
   {
     printf("verifying bg + urgent kernels against float64 host reference...\n");
     CUDA_CHECK(cudaMemset(dC, 0xFF, (size_t)M * N * sizeof(float)));
-    CUDA_CHECK(cudaMemset(dCu, 0xFF, (size_t)TM * TN * sizeof(float)));
+    CUDA_CHECK(cudaMemset(dCu, 0xFF,
+                        (size_t)urgentBlocks * TM * TN * sizeof(float)));
     reset_run(bgStream);
     // Null-stream fills don't order against non-blocking streams, and a
     // saturated grid blocks the fill kernel outright; sync before launch.
     CUDA_CHECK(cudaDeviceSynchronize());
     launch_bg();
-    urgent_tile<<<1, THREADS, 0, uStream>>>(dA, dB, dCu, K, N, dUStart, dUEnd);
+    CUDA_CHECK(cudaMemsetAsync(dUEnd, 0, sizeof(long long), uStream));
+    urgent_tile<<<urgentBlocks, THREADS, 0, uStream>>>(
+        dA, dB, dCu, K, N, tilesN, dUStart, (unsigned long long*)dUEnd);
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaGetLastError());
 
-    std::vector<float> hC((size_t)M * N), hCu((size_t)TM * TN);
+    std::vector<float> hC((size_t)M * N),
+        hCu((size_t)urgentBlocks * TM * TN);
     CUDA_CHECK(cudaMemcpy(hC.data(), dC, hC.size() * sizeof(float),
                           cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(hCu.data(), dCu, hCu.size() * sizeof(float),
                           cudaMemcpyDeviceToHost));
-    // bg covers the whole tile grid only if bgTasks >= totalTiles.
+    // bg covers the whole tile grid only if bgTasks >= totalTiles. The
+    // urgent job's U tiles are checked against the same per-element ref.
     const int coveredTiles = std::min(bgTasks, totalTiles);
     int bad = 0, nans = 0;
     double maxRel = 0.0;
@@ -261,7 +277,8 @@ int main(int argc, char** argv) {
             if (err > atol + rtol * std::fabs(ref)) ++bad;
           };
           check(hC[(size_t)row * N + col]);
-          if (tile == 0) check(hCu[(size_t)i * TN + j]);
+          if (tile < urgentBlocks)
+            check(hCu[(size_t)tile * TM * TN + (size_t)i * TN + j]);
         }
       }
     }
@@ -270,8 +287,8 @@ int main(int argc, char** argv) {
               nans, bad, maxRel);
       return 1;
     }
-    printf("PASS: %d tiles + urgent tile, max rel err %.3e\n", coveredTiles,
-           maxRel);
+    printf("PASS: %d tiles + %d urgent tiles, max rel err %.3e\n",
+           coveredTiles, urgentBlocks, maxRel);
   }
 
   // --- Drain estimate (bg alone, device timeline), used to place arrivals.
@@ -303,7 +320,9 @@ int main(int argc, char** argv) {
     const double tArrive = now_us();
     CUDA_CHECK(cudaMemcpyAsync(hConsumed, dNext, sizeof(unsigned int),
                                cudaMemcpyDeviceToHost, uStream));
-    urgent_tile<<<1, THREADS, 0, uStream>>>(dA, dB, dCu, K, N, dUStart, dUEnd);
+    CUDA_CHECK(cudaMemsetAsync(dUEnd, 0, sizeof(long long), uStream));
+    urgent_tile<<<urgentBlocks, THREADS, 0, uStream>>>(
+        dA, dB, dCu, K, N, tilesN, dUStart, (unsigned long long*)dUEnd);
     CUDA_CHECK(cudaStreamSynchronize(uStream));
     const double tDone = now_us();
     CUDA_CHECK(cudaStreamSynchronize(bgStream));

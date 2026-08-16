@@ -86,7 +86,8 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
     float* __restrict__ C, float* __restrict__ Cu, int K, int N, int tilesN,
     int totalTiles, unsigned numTasks, unsigned int* nextTask,
     int* flag, const long long* schedGapsNs, int numEvents,
-    long long* setGT, long long* obsGT, int* claim, long long* uGT) {
+    long long* setGT, long long* obsGT, int* claim, long long* uGT,
+    int urgentTiles, int* uqNext, unsigned long long* uEndMax) {
   __shared__ unsigned s_task;
   __shared__ int s_flag;
   __shared__ int s_claimed;
@@ -136,15 +137,36 @@ __global__ void __launch_bounds__(THREADS, 4) persistent_yield(
       if (threadIdx.x == 0) {
         for (int e = lastSeen; e < f; ++e)  // f-lastSeen>1 = missed event(s)
           obsGT[(size_t)e * gridDim.x + blockIdx.x] = g;
-        s_claimed = (atomicCAS(&claim[f - 1], 0, (int)blockIdx.x + 1) == 0);
         s_lastSeen = f;
       }
       __syncthreads();
-      if (s_claimed) {
-        if (threadIdx.x == 0) uGT[2 * (size_t)(f - 1)] = globaltimer_ns();
+      // A3: urgent work is a mini-queue of urgentTiles tiles. Observers
+      // pop and execute until it drains, then resume background work —
+      // the cooperative arm parallelizes urgent work across yielding
+      // workers, which is what the reserved-capacity arm cannot do. All
+      // poppers compute tile (0,0), so verification stays one tile per
+      // event (identical-value concurrent writes are benign) while the
+      // executed WORK is real. e2e = set -> last popper's completion.
+      // urgentTiles == 1 reproduces the old single-claimer semantics.
+      bool popped = false;
+      while (true) {
+        if (threadIdx.x == 0) s_claimed = atomicAdd(&uqNext[f - 1], 1);
+        __syncthreads();
+        const int uidx = s_claimed;
+        __syncthreads();
+        if (uidx >= urgentTiles) break;
+        if (uidx == 0 && threadIdx.x == 0) {
+          claim[f - 1] = (int)blockIdx.x + 1;  // first popper = claimer
+          uGT[2 * (size_t)(f - 1)] = globaltimer_ns();
+        }
         tile_gemm(A, B, Cu, K, N, 0, 0, TN, 0, 0);
         __syncthreads();
-        if (threadIdx.x == 0) uGT[2 * (size_t)(f - 1) + 1] = globaltimer_ns();
+        popped = true;
+      }
+      if (popped && threadIdx.x == 0) {
+        const unsigned long long ge = (unsigned long long)globaltimer_ns();
+        atomicMax(&uEndMax[f - 1], ge);
+        uGT[2 * (size_t)(f - 1) + 1] = (long long)ge;
       }
     }
 
@@ -304,6 +326,7 @@ int main(int argc, char** argv) {
   const int warmupEvents = (int)parse_arg(argc, argv, "--warmup-events", 100);
   const char* csvPath = parse_str(argc, argv, "--csv", "");
   const char* dumpObsPath = parse_str(argc, argv, "--dump-obs", "");
+  const int urgentTiles = (int)parse_arg(argc, argv, "--urgent-tiles", 1);
 
   if (K % KB != 0) {
     fprintf(stderr, "--k must be a multiple of %d\n", KB);
@@ -349,6 +372,10 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMalloc(&dObsGT, (size_t)evAlloc * blocks * sizeof(long long)));
   CUDA_CHECK(cudaMalloc(&dUGT, (size_t)evAlloc * 2 * sizeof(long long)));
   CUDA_CHECK(cudaMalloc(&dClaim, (size_t)evAlloc * sizeof(int)));
+  int* dUqNext;
+  unsigned long long* dUEndMax;
+  CUDA_CHECK(cudaMalloc(&dUqNext, (size_t)evAlloc * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&dUEndMax, (size_t)evAlloc * sizeof(unsigned long long)));
   CUDA_CHECK(cudaMemcpy(dA, hA.data(), hA.size() * sizeof(float),
                         cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(dB, hB.data(), hB.size() * sizeof(float),
@@ -366,6 +393,9 @@ int main(int argc, char** argv) {
         cudaMemset(dObsGT, 0, (size_t)evAlloc * blocks * sizeof(long long)));
     CUDA_CHECK(cudaMemset(dUGT, 0, (size_t)evAlloc * 2 * sizeof(long long)));
     CUDA_CHECK(cudaMemset(dClaim, 0, (size_t)evAlloc * sizeof(int)));
+    CUDA_CHECK(cudaMemset(dUqNext, 0, (size_t)evAlloc * sizeof(int)));
+    CUDA_CHECK(cudaMemset(dUEndMax, 0,
+                          (size_t)evAlloc * sizeof(unsigned long long)));
   };
 
   auto launch = [&](bool poll, unsigned nTasks, const long long* sched,
@@ -373,29 +403,29 @@ int main(int argc, char** argv) {
     if (!poll) {
       persistent_yield<false, 1><<<blocks, THREADS, 0, kStream>>>(
           dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-          nullptr, 0, dSetGT, dObsGT, dClaim, dUGT);
+          nullptr, 0, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
       return;
     }
     switch (pollEvery) {
       case 1:
         persistent_yield<true, 1><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
         break;
       case 2:
         persistent_yield<true, 2><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
         break;
       case 4:
         persistent_yield<true, 4><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
         break;
       case 8:
         persistent_yield<true, 8><<<blocks, THREADS, 0, kStream>>>(
             dA, dB, dC, dCu, K, N, tilesN, totalTiles, nTasks, dNext, dFlag,
-            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT);
+            sched, nEvents, dSetGT, dObsGT, dClaim, dUGT, urgentTiles, dUqNext, dUEndMax);
         break;
       default:
         fprintf(stderr, "--poll-every must be 1, 2, 4, or 8\n");
@@ -764,7 +794,7 @@ int main(int argc, char** argv) {
     const double spreadUs = (hi - lo) / 1e3;
     const double b0Us = (hObs[(size_t)e * blocks + 0] - setNs) / 1e3;
     const double e2eUs =
-        hClaim[e] ? (hUGT[2 * (size_t)e + 1] - setNs) / 1e3 : -1.0;
+        hUEnd[e] ? ((long long)hUEnd[e] - setNs) / 1e3 : -1.0;
     if (complete && e >= warmupEvents) {  // audit: discard warmup events
       lat.push_back(latUs);
       latX0.push_back(latX0Us);

@@ -306,3 +306,27 @@ the predicted SM-level correlation does not exist at measurable size.
 **Next:** reserved-capacity Pareto (A3), then the paper rewrite on the
 corrected constructs. All summary tables now generate from committed
 CSVs by script (scripts/analyze_review2.py).
+
+## 2026-08-15. A3 Pareto: instruments extended, predictions filed
+
+Reserved arm (urgent_baseline): --reserve R holds slots out of the
+grid; --urgent-blocks U launches a U-block urgent job, block b computes
+tile b (distinct work), job e2e = arrival to last-block completion.
+Cooperative arm (yield): --urgent-tiles U makes urgent work a mini-queue
+popped by yielding workers; U = 1 reproduces the old claimer exactly.
+
+Predictions, before any run:
+- Reserved throughput loss is linear in R: ~0.35% per slot (R/288),
+  measured drain rate confirms within 1 point.
+- Reserved urgent e2e: U <= R gives 40-90 us (one wave). U > R runs
+  ceil(U/R) waves: R=1, U=16 predicted >= 350 us, approaching the
+  no-reserve baseline regime.
+- Cooperative urgent e2e grows weakly with U (poppers parallelize):
+  p50 within 2x from U=1 to U=16; stays under 100 us at U=16.
+- Cooperative throughput cost: the ~0-3% poll overhead plus under 1%
+  of capacity in urgent work at these arrival rates.
+- The Pareto verdict predicted: cooperative dominates every reserved
+  point with U > R; reserved wins only the U=1, small-R corner, and
+  only on latency, never on throughput. Falsifier: if reserved R=1/U=1
+  beats cooperative U=1 by more than 2x on p99, spatial headroom owns
+  the small-urgent regime and the paper says so.
