@@ -2,6 +2,9 @@
 \usepackage[margin=1in]{geometry}
 \usepackage{booktabs}
 \usepackage{graphicx}
+% Resolves whether handoff.png sits in figures/ or beside the .tex,
+% so a single-file upload to a LaTeX host still finds it.
+\graphicspath{{figures/}{./}}
 \usepackage{amsmath}
 \usepackage{microtype}
 \usepackage[hidelinks]{hyperref}
@@ -231,9 +234,9 @@ memory.
 The original claim file was committed on 2026-08-04; its registered
 sections were never modified, and every subsequent construct was
 appended as a dated amendment before its data was collected.
-Thresholds, condensed (the claim file is the authority): The provenance is
-the repository's public GitHub history, which predates all measurement
-commits.
+The thresholds below are condensed; the claim file is the authority,
+and its provenance is the repository's public GitHub history, which
+predates all measurement commits.
 
 \textbf{N1.} Bounded tile-level preemption works on Ampere without
 cluster primitives at cost comparable to Hopper, because the bound is
@@ -254,7 +257,7 @@ registration cannot certify: two registered constructs did not measure
 what their names claimed, and were corrected by dated post-registration
 amendments with the registered readings co-reported
 (Section~\ref{sec:method}); (c) \emph{implementation faults}, caught
-by controls and instrumentation: seventeen are on the record, each
+by controls and instrumentation: eighteen are on the record, each
 with its detection mechanism, and five of them are findings in their
 own right. Registration, construct audit, and instrument controls are
 different tools; conflating them is how measurement studies fail
@@ -311,8 +314,10 @@ set timestamps are host-read only after stream synchronization, so
 nothing is published through the flag and no acquire/release pairing
 exists to serve. CUDA C\texttt{++} \texttt{volatile} carries no
 inter-thread synchronization guarantee. The hot polling kernel
-compiles to the same 4400 SASS instructions under either protocol, so
-the contract costs nothing.
+compiles to an identical instruction count under either protocol
+(4400 in the build where the comparison was made; later reworks moved
+the absolute count, and the guard is re-pinned per build), so the
+contract costs nothing.
 
 \paragraph{Verification and controls.} Element-wise float64 reference
 checks on every output; NaN pre-fill so unexecuted work fails loudly;
@@ -327,8 +332,8 @@ identity---closing the blind spot idempotent tile writes leave in any
 numerical check. Hard gate enforcement: a run aborts on any gate failure; completion
 markers are not gates.
 
-\paragraph{Environment and clock discipline.} Four rented instances:
-three A10s (GA102, 72~SMs, locks at 1200\,MHz) and one A100-SXM4-40GB
+\paragraph{Environment and clock discipline.} Five rented instances:
+four A10s (GA102, 72~SMs, locks at 1200\,MHz) and one A100-SXM4-40GB
 (GA100, 108~SMs, 1410\,MHz). Locks are verified by read-back
 \emph{under load, per box}: the 150\,W A10 cap throttles through
 nominally accepted higher locks; one A10 part sags to 1035\,MHz at its
@@ -393,7 +398,7 @@ finish.
 
 \begin{figure}[!t]
   \centering
-  \includegraphics[width=\linewidth]{figures/handoff.png}
+  \includegraphics[width=\linewidth]{handoff.png}
   \caption{Generated from committed summary data by committed scripts.
   (a)~Handoff latency versus resident blocks per poll period (A10,
   atomic build): latency scales with poll period and co-residency, not
@@ -805,7 +810,8 @@ MIG, Green Contexts, which ExpertPlex positions against dynamic
 reallocation---our Section~\ref{sec:pareto} measures that tradeoff
 directly at the single-kernel scale. \emph{Sub-Hopper megakernels in
 practice:} adaptive megakernels ship on Ada-class parts without
-TMA~\cite{adamk}, and community megakernels run on consumer GA102
+TMA~\cite{adamk} (Ada-MK is evaluated on the L20), and community
+megakernels run on consumer GA102
 GPUs,\footnote{E.g., MegaQwen,
 \url{https://github.com/Infatoshi/MegaQwen}.} which is the population
 this study's condition describes.
@@ -839,13 +845,13 @@ The repository contains the code, the registered claim file and dated
 amendments (provenance: public GitHub history predating all
 measurement commits), summary data with the scripts that generate
 every table in this paper, the figure pipeline, and a dated run log
-including every recorded fault (seventeen at this writing) with its
+including every recorded fault (eighteen at this writing) with its
 detection mechanism; raw
 per-event distributions accompany the artifact release. AI tools
 (Claude) assisted with code and documentation; the author directed,
 reviewed, and verified all work. No measured number comes from a
 model: every result is produced by the released instruments under the
-registered thresholds, and primary results were reproduced across four physical GPUs
+registered thresholds, and primary results were reproduced across five physical GPUs
 spanning two Ampere compute capabilities (sm\_80 and sm\_86).
 
 \begin{thebibliography}{12}
@@ -913,9 +919,10 @@ Preemptive Scheduling of GPU.
 \newblock PPoPP 2017.
 
 \bibitem{adamk}
-Ada-MK authors.
-\newblock Adaptive megakernels via offline DAG search on Ada-class
-GPUs.
+W.~Dong, M.~Hu, G.~Yu, Q.~Fu, P.~Xu, H.~Xu, Y.~Xing, X.~Jiao, S.~Li,
+and L.~Liu.
+\newblock Ada-MK: Adaptive MegaKernel Optimization via Automated
+DAG-based Search for LLM Inference.
 \newblock arXiv:2605.11581, 2026.
 
 \bibitem{cudart}
